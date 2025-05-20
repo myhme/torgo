@@ -45,10 +45,14 @@ RUN mkdir -p /data/config/tor_tp /data/config/dnsmasq /data/config/torgo_instanc
     chown -R nobody:nobody /data/config
 
 # Expose necessary ports
-EXPOSE 2525 # API port for torgo (defined by -apiPort flag in main.go)
-EXPOSE 9049 # SOCKS5 Load Balancer port for torgo (defined by -lbPort flag in main.go)
-EXPOSE 53/tcp # dnsmasq DNS port
-EXPOSE 53/udp # dnsmasq DNS port
+EXPOSE 2525
+# API port for torgo (defined by -apiPort flag in main.go)
+EXPOSE 9049 
+# SOCKS5 Load Balancer port for torgo (defined by -lbPort flag in main.go)
+EXPOSE 53/tcp 
+# dnsmasq DNS port
+EXPOSE 53/udp 
+# dnsmasq DNS port
 
 # Environment variables for paths used by entrypoint.sh and the application
 ENV TOR_PATH="/usr/bin/tor"
