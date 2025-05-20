@@ -32,8 +32,11 @@ RUN mkdir -p /var/lib/tor && chown _tor:_tor /var/lib/tor && chmod 700 /var/lib/
 RUN mkdir -p /var/run/tor && chown _tor:_tor /var/run/tor && chmod 700 /var/run/tor
 
 # Expose the Go API port and the new common SOCKS/DNS proxy ports
-EXPOSE 8080 # Go management API (configurable via API_PORT)
-EXPOSE 9000 # Common SOCKS proxy port (configurable via COMMON_SOCKS_PROXY_PORT)
-EXPOSE 5300 # Common DNS proxy port (UDP/TCP) (configurable via COMMON_DNS_PROXY_PORT)
+EXPOSE 8080
+# Go management API (configurable via API_PORT)
+EXPOSE 9000
+# Common SOCKS proxy port (configurable via COMMON_SOCKS_PROXY_PORT)
+EXPOSE 5300
+# Common DNS proxy port (UDP/TCP) (configurable via COMMON_DNS_PROXY_PORT)
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
