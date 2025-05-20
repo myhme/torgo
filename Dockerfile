@@ -18,6 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-w -s" -installsuffix cgo -o 
 
 # ---- Runtime Stage ----
 FROM alpine:3.21
+# Install Tor (which creates _tor user), su-exec, ca-certificates, and coreutils
 RUN apk add --no-cache tor su-exec ca-certificates coreutils
 
 WORKDIR /app
@@ -28,8 +29,11 @@ COPY torrc.template /etc/tor/torrc.template
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-RUN mkdir -p /var/lib/tor && chown _tor:_tor /var/lib/tor && chmod 700 /var/lib/tor
-RUN mkdir -p /var/run/tor && chown _tor:_tor /var/run/tor && chmod 700 /var/run/tor
+# Create base directories.
+# The 'tor' package installation should set appropriate permissions for /var/lib/tor.
+# The entrypoint.sh script will handle permissions for /var/run/tor and instance-specific subdirectories.
+RUN mkdir -p /var/lib/tor
+RUN mkdir -p /var/run/tor
 
 # Expose the Go API port and the new common SOCKS/DNS proxy ports
 EXPOSE 8080
