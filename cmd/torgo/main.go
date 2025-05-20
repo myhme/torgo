@@ -20,8 +20,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
 	log.Println("Starting torgo application...")
 
-	// Load configuration once. It's stored in config.GlobalConfig.
-	appCfg := config.LoadConfig()
+	appCfg := config.LoadConfig() // Load configuration once
 
 	log.Printf("Initializing 'torgo' for %d backend Tor instance(s). Stagger delay: %v", appCfg.NumTorInstances, appCfg.RotationStaggerDelay)
 	log.Printf("Common SOCKS on port: %s, Common DNS on port: %s, Management API on port: %s", appCfg.CommonSocksPort, appCfg.CommonDNSPort, appCfg.APIPort)
@@ -30,7 +29,7 @@ func main() {
 	for i := 0; i < appCfg.NumTorInstances; i++ {
 		instanceID := i + 1
 		// Pass appCfg to New, so instance methods can access global settings like timeouts
-		backendInstances[i] = torinstance.New(instanceID, appCfg)
+		backendInstances[i] = torinstance.New(instanceID, appCfg) 
 	}
 
 	// Create a cancellable context for graceful shutdown
@@ -49,11 +48,15 @@ func main() {
 	// Setup HTTP API router
 	// The MasterAPIRouter now directly uses the instances and appCfg
 	httpMux := http.NewServeMux() // Use a new ServeMux for clarity
-	httpMux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
+	httpMux.HandleFunc("/webui", api.WebUIHandler) // Serve HTML at /webui
+	httpMux.HandleFunc("/webui/", api.WebUIHandler) // Also handle if user types /webui/
+
+	// API routes
+	httpMux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) { // Catch-all for API
 		api.MasterAPIRouter(w, r, backendInstances, appCfg)
 	})
 
-	// Start the HTTP API server
+
 	apiServer := &http.Server{
 		Addr:    ":" + appCfg.APIPort,
 		Handler: httpMux, // Use the new mux
@@ -63,7 +66,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Management API server listening on :%s", appCfg.APIPort)
+		log.Printf("Management API server (and WebUI at /webui) listening on :%s", appCfg.APIPort)
 		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start management API server: %v", err)
 		}

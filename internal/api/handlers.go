@@ -1,6 +1,7 @@
 package api
 
 import (
+	"embed" 
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,12 +19,47 @@ import (
 	"torgo/internal/torinstance"
 )
 
+//go:embed webui.html
+var webUIContent embed.FS 
+
 func firstNChars(s string, n int) string {
     if len(s) > n {
         return s[:n]
     }
     return s
 }
+
+// WebUIHandler serves the webui.html file.
+func WebUIHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/webui" && r.URL.Path != "/webui/" { 
+        http.NotFound(w, r)
+        return
+    }
+	
+	htmlContent, err := webUIContent.ReadFile("webui.html")
+	if err != nil {
+		log.Printf("Error reading embedded webui.html: %v", err)
+		http.Error(w, "Internal Server Error: Could not load Web UI.", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(htmlContent)
+}
+
+// AppDetailsHandler serves basic application details like number of instances.
+func AppDetailsHandler(w http.ResponseWriter, r *http.Request, appCfg *config.AppConfig) {
+	details := map[string]interface{}{
+		"num_instances":       appCfg.NumTorInstances,
+		"common_socks_port":   appCfg.CommonSocksPort,
+		"common_dns_port":     appCfg.CommonDNSPort,
+		"api_port":            appCfg.APIPort,
+		"rotation_stagger_delay_seconds": int(appCfg.RotationStaggerDelay.Seconds()),
+		"health_check_interval_seconds": int(appCfg.HealthCheckInterval.Seconds()),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(details)
+}
+
 
 func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances []*torinstance.Instance, appCfg *config.AppConfig) {
 	if !atomic.CompareAndSwapInt32(&appCfg.IsGlobalRotationActive, 0, 1) {
@@ -38,8 +74,8 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 	flusher, okFlusher := w.(http.Flusher)
 	if okFlusher {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		flusher.Flush()
+		w.Header().Set("X-Content-Type-Options", "nosniff") 
+		flusher.Flush() 
 	} else {
 		log.Println("Warning: ResponseWriter does not support flushing for staggered rotation progress.")
 	}
@@ -59,7 +95,10 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 	}
 
 	if len(healthyInstances) == 0 {
-		log.Println("API: No healthy instances to rotate."); fmt.Fprintln(w, "No healthy instances found to rotate."); return
+		log.Println("API: No healthy instances to rotate."); 
+		fmt.Fprintln(w, "No healthy instances found to rotate.")
+		if okFlusher { flusher.Flush() }
+		return
 	}
 
 	log.Printf("API: Found %d healthy instances for staggered rotation.", len(healthyInstances))
@@ -68,9 +107,11 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 
 	for i, instance := range healthyInstances {
 		select {
-		case <-r.Context().Done(): // Check if client disconnected
+		case <-r.Context().Done(): 
 			log.Printf("API: Staggered rotation cancelled by client disconnect before instance %d.", instance.InstanceID)
-			fmt.Fprintln(w, "Rotation cancelled by client."); return
+			fmt.Fprintln(w, "Rotation cancelled by client.")
+			if okFlusher { flusher.Flush() }
+			return
 		default:
 		}
 		log.Printf("API: Staggered rotation: Rotating instance %d (%s)", instance.InstanceID, instance.ControlHost)
@@ -87,23 +128,32 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 		}
 		if okFlusher { flusher.Flush() }
 
-		if i < len(healthyInstances)-1 { // Don't sleep after the last one
+		if i < len(healthyInstances)-1 { 
 			log.Printf("API: Staggered rotation: Sleeping for %v before next instance.", appCfg.RotationStaggerDelay)
 			select {
 			case <-time.After(appCfg.RotationStaggerDelay):
 			case <-r.Context().Done(): 
 				log.Printf("API: Staggered rotation sleep interrupted by client disconnect for instance %d.", instance.InstanceID)
-				fmt.Fprintln(w, "Rotation sleep interrupted by client."); return
+				fmt.Fprintln(w, "Rotation sleep interrupted by client.")
+				if okFlusher { flusher.Flush() }
+				return
 			}
 		}
 	}
-	log.Println("API: Staggered rotation completed for all healthy instances."); fmt.Fprintln(w, "Staggered rotation process completed.")
+	log.Println("API: Staggered rotation completed for all healthy instances."); 
+	fmt.Fprintln(w, "Staggered rotation process completed.")
+	if okFlusher { flusher.Flush() }
 }
 
 // MasterAPIRouter routes API calls to the appropriate handler.
 func MasterAPIRouter(w http.ResponseWriter, r *http.Request, instances []*torinstance.Instance, appCfg *config.AppConfig) {
 	path := r.URL.Path
-
+	
+	// Handle global (non-instance-specific) routes first
+	if path == "/api/v1/app-details" {
+		AppDetailsHandler(w, r, appCfg)
+		return
+	}
 	if path == "/api/v1/rotate-all-staggered" {
 		if r.Method == http.MethodPost || r.Method == http.MethodGet {
 			rotateAllStaggeredHandler(w, r, instances, appCfg)
@@ -266,13 +316,11 @@ func handleInstanceConfig(w http.ResponseWriter, r *http.Request, instance *tori
 		log.Printf("API: Instance %d: Successfully sent SETCONF %s. Response: %s", instance.InstanceID, torConfigKey, response)
 		fmt.Fprintf(w, "Instance %d: %s set to %s for current Tor session. Tor response: %s\n", instance.InstanceID, torConfigKey, fullAddressToSet, response)
 
-		// Update internal state
 		switch subAction {
 		case "socksport":
 			instance.Mu.Lock()
 			instance.BackendSocksHost = fullAddressToSet 
 			instance.Mu.Unlock()
-			// Call the exported method which handles its own locking
 			instance.ReinitializeHTTPClient()
 		case "dnsport":
 			instance.Mu.Lock()
