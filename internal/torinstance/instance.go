@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -55,7 +54,6 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 		IsHealthy:        false,
 		appConfig:        appCfg,
 	}
-	// Initialize HTTP client for this instance
 	ti.Mu.Lock()
 	ti.initializeHTTPClientUnlocked()
 	ti.Mu.Unlock()
@@ -81,6 +79,7 @@ func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, erro
 		return nil, nil, err
 	}
 
+	// log.Printf("Instance %d: Attempting to connect to Tor control port: %s", ti.InstanceID, ti.ControlHost)
 	conn, err := net.DialTimeout("tcp", ti.ControlHost, 5*time.Second)
 	if err != nil {
 		return nil, nil, fmt.Errorf("instance %d: failed to connect to control port %s: %w", ti.InstanceID, ti.ControlHost, err)
@@ -109,12 +108,14 @@ func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, erro
 		return nil, nil, fmt.Errorf("instance %d: tor control port authentication failed: %s", ti.InstanceID, strings.TrimSpace(statusLine))
 	}
 	ti.activeControlConn = conn
+	// log.Printf("Instance %d: Successfully connected and authenticated with Tor control port %s", ti.InstanceID, ti.ControlHost)
 	return conn, reader, nil
 }
 
 // CloseControlConnUnlocked closes the active control connection. Assumes ti.Mu is locked.
 func (ti *Instance) CloseControlConnUnlocked() {
 	if ti.activeControlConn != nil {
+		// log.Printf("Instance %d: Closing active Tor control connection to %s", ti.InstanceID, ti.activeControlConn.RemoteAddr().String())
 		ti.activeControlConn.Close()
 		ti.activeControlConn = nil
 	}
@@ -130,71 +131,71 @@ func (ti *Instance) SendTorCommand(command string) (string, error) {
 	var err error
 
 	if ti.activeControlConn != nil {
-		ti.activeControlConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		if _, errTest := ti.activeControlConn.Write([]byte("\r\n")); errTest != nil { // Simple connection test
-			ti.activeControlConn.SetWriteDeadline(time.Time{}) // Clear deadline on error
-			log.Printf("Instance %d: Active control connection test failed (%v), closing and reconnecting.", ti.InstanceID, errTest)
-			ti.CloseControlConnUnlocked() // Use the method that assumes lock is held
-		} else {
-			ti.activeControlConn.SetWriteDeadline(time.Time{}) // Clear deadline on success
-			conn = ti.activeControlConn
-			reader = bufio.NewReader(conn)
-		}
-	}
-
-	if conn == nil { // If no active connection or test failed
-		conn, reader, err = ti.connectToTorControlUnlocked() // Use the method that assumes lock is held
+		// If we have an active connection, assume it's good for now.
+		// If a write/read fails, we will close it below.
+		conn = ti.activeControlConn
+		reader = bufio.NewReader(conn) // Create a new reader for this command interaction
+	} else {
+		// No active connection, establish a new one
+		conn, reader, err = ti.connectToTorControlUnlocked()
 		if err != nil {
 			return "", fmt.Errorf("instance %d SendTorCommand: connection phase failed: %w", ti.InstanceID, err)
 		}
 	}
 
-	conn.SetWriteDeadline(time.Now().Add(ti.appConfig.SocksTimeout))
+	// Set deadline for writing the command
+	conn.SetWriteDeadline(time.Now().Add(ti.appConfig.SocksTimeout)) // Using SocksTimeout for control commands too
 	if _, errWrite := conn.Write([]byte(command + "\r\n")); errWrite != nil {
-		conn.SetWriteDeadline(time.Time{})
-		ti.CloseControlConnUnlocked() // Close connection on write error
+		conn.SetWriteDeadline(time.Time{})   // Clear deadline
+		ti.CloseControlConnUnlocked()       // Close connection on write error
+		log.Printf("Instance %d: Write failed for command '%s' (%v), connection closed.", ti.InstanceID, command, errWrite)
 		return "", fmt.Errorf("instance %d: write failed for command '%s': %w", ti.InstanceID, command, errWrite)
 	}
-	conn.SetWriteDeadline(time.Time{})
+	conn.SetWriteDeadline(time.Time{}) // Clear deadline
 
 	var responseBuffer bytes.Buffer
 	isMultiLine := strings.HasPrefix(command, "GETINFO")
-	readDeadlineDuration := 10 * time.Second
+	
+	// Set a read deadline for the response
+	readDeadlineDuration := 10 * time.Second // Default for simple commands
 	if isMultiLine {
-		readDeadlineDuration = 20 * time.Second
+		readDeadlineDuration = 20 * time.Second // Longer for potentially multi-line GETINFO
 	}
 	conn.SetReadDeadline(time.Now().Add(readDeadlineDuration))
-
 
 	for {
 		line, errRead := reader.ReadString('\n')
 		if errRead != nil {
-			conn.SetReadDeadline(time.Time{})
-			ti.CloseControlConnUnlocked()
-			if errRead == io.EOF && responseBuffer.Len() > 0 {
-				break
-			}
-			return responseBuffer.String(), fmt.Errorf("instance %d: failed to read response for '%s': %w. Partial: %s", ti.InstanceID, command, errRead, responseBuffer.String())
+			conn.SetReadDeadline(time.Time{}) // Clear deadline
+			ti.CloseControlConnUnlocked()     // Close connection on read error
+			log.Printf("Instance %d: Read failed for command '%s' (%v), connection closed. Partial response: '%s'", ti.InstanceID, command, errRead, responseBuffer.String())
+			// Return what we have, plus the error
+			return responseBuffer.String(), fmt.Errorf("instance %d: failed to read full response for '%s': %w. Partial: '%s'", ti.InstanceID, command, errRead, responseBuffer.String())
 		}
 		responseBuffer.WriteString(line)
 		trimmedLine := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmedLine, "250 OK") { break }
-		if strings.HasPrefix(trimmedLine, "250 ") && !strings.HasPrefix(trimmedLine, "250-") && !isMultiLine { break }
-		if strings.HasPrefix(trimmedLine, "5") { break }
+		
+		if strings.HasPrefix(trimmedLine, "250 OK") { break } // Standard success, end of response
+		if strings.HasPrefix(trimmedLine, "250 ") && !strings.HasPrefix(trimmedLine, "250-") && !isMultiLine { break } // Single line success for non-multiline
+		if strings.HasPrefix(trimmedLine, "5") { // Error codes (5xx) typically indicate end of response
+			log.Printf("Instance %d: Received Tor error response for command '%s': %s", ti.InstanceID, command, trimmedLine)
+			break 
+		}
 	}
-	conn.SetReadDeadline(time.Time{})
+	conn.SetReadDeadline(time.Time{}) // Clear read deadline
 	return strings.TrimSpace(responseBuffer.String()), nil
 }
 
 // CheckHealth updates the IsHealthy status of the instance.
 func (ti *Instance) CheckHealth(ctx context.Context) bool {
-	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	healthCtx, cancel := context.WithTimeout(ctx, 7*time.Second) // Slightly longer timeout for health check command
 	defer cancel()
 
 	type result struct { response string; err error }
 	ch := make(chan result, 1)
 
 	go func() {
+		// log.Printf("Instance %d: Initiating health check (GETINFO status/bootstrap-phase)", ti.InstanceID)
 		resp, err := ti.SendTorCommand("GETINFO status/bootstrap-phase")
 		ch <- result{resp, err}
 	}()
@@ -204,16 +205,20 @@ func (ti *Instance) CheckHealth(ctx context.Context) bool {
 	case <-healthCtx.Done():
 		log.Printf("Instance %d: Health check timed out for control host %s", ti.InstanceID, ti.ControlHost)
 	case res := <-ch:
-		if res.err == nil && strings.Contains(res.response, "PROGRESS=100 TAG=done") {
+		// More precise check for the bootstrap success message
+		if res.err == nil && strings.Contains(res.response, "status/bootstrap-phase=PROGRESS=100 TAG=done SUMMARY=\"Done\"") {
 			isCurrentlyHealthy = true
 		} else {
+			// Log detailed error or unexpected response
+			errMsg := "unknown reason"
 			if res.err != nil {
-				log.Printf("Instance %d: Health check failed for control host %s (error: %v)", ti.InstanceID, ti.ControlHost, res.err)
-			} else if !strings.Contains(res.response, "PROGRESS=100 TAG=done") {
+				errMsg = fmt.Sprintf("error: %v", res.err)
+			} else if !strings.Contains(res.response, "PROGRESS=100 TAG=done") { // Check only for the core part if SUMMARY varies
 				logMsg := res.response
-				if len(logMsg) > 70 { logMsg = logMsg[:70] + "..."}
-				log.Printf("Instance %d: Health check shows not fully bootstrapped for control host %s (response: %s)", ti.InstanceID, ti.ControlHost, logMsg)
+				if len(logMsg) > 100 { logMsg = logMsg[:100] + "..."} // Log more of the response
+				errMsg = fmt.Sprintf("unexpected bootstrap phase: '%s'", logMsg)
 			}
+			log.Printf("Instance %d: Health check failed for control host %s (%s)", ti.InstanceID, ti.ControlHost, errMsg)
 		}
 	}
 

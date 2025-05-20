@@ -39,7 +39,7 @@ type AppConfig struct {
 
 	// For round-robin load balancing (shared state)
 	LBMutex        sync.Mutex
-	LBCurrentIndex int32 // Using int32 for potential atomic operations, though simple lock is often fine.
+	LBCurrentIndex int32
 
 	// For staggered rotation (shared state)
 	IsGlobalRotationActive int32 // 0 for false, 1 for true (atomic)
@@ -49,12 +49,11 @@ var GlobalConfig *AppConfig
 var once sync.Once
 
 // LoadConfig loads configuration from environment variables or defaults.
-// It's designed to be called once.
 func LoadConfig() *AppConfig {
 	once.Do(func() {
 		log.Println("Loading application configuration...")
 		cfg := &AppConfig{
-			LBCurrentIndex: -1, // Start at -1 so first pick is 0
+			LBCurrentIndex: -1, 
 		}
 
 		nInstancesStr := os.Getenv("TOR_INSTANCES_CONFIGURED")
@@ -69,21 +68,18 @@ func LoadConfig() *AppConfig {
 		sBasePortStr := os.Getenv("SOCKS_BASE_PORT_CONFIGURED")
 		cfg.SocksBasePort, err = strconv.Atoi(sBasePortStr)
 		if err != nil || cfg.SocksBasePort == 0 {
-			// log.Printf("SOCKS_BASE_PORT_CONFIGURED not set or invalid, defaulting to %d", DefaultSocksBasePort)
 			cfg.SocksBasePort = DefaultSocksBasePort
 		}
 
 		cBasePortStr := os.Getenv("CONTROL_BASE_PORT_CONFIGURED")
 		cfg.ControlBasePort, err = strconv.Atoi(cBasePortStr)
 		if err != nil || cfg.ControlBasePort == 0 {
-			// log.Printf("CONTROL_BASE_PORT_CONFIGURED not set or invalid, defaulting to %d", DefaultControlBasePort)
 			cfg.ControlBasePort = DefaultControlBasePort
 		}
 
 		dBasePortStr := os.Getenv("DNS_BASE_PORT_CONFIGURED")
 		cfg.DNSBasePort, err = strconv.Atoi(dBasePortStr)
 		if err != nil || cfg.DNSBasePort == 0 {
-			// log.Printf("DNS_BASE_PORT_CONFIGURED not set or invalid, defaulting to %d", DefaultDNSBasePort)
 			cfg.DNSBasePort = DefaultDNSBasePort
 		}
 
@@ -101,7 +97,6 @@ func LoadConfig() *AppConfig {
 		if cfg.APIPort == "" {
 			cfg.APIPort = DefaultAPIPort
 		}
-
 
 		delayStr := os.Getenv("ROTATION_STAGGER_DELAY_SECONDS")
 		if delaySec, err := strconv.Atoi(delayStr); err == nil && delaySec > 0 {
@@ -129,9 +124,8 @@ func LoadConfig() *AppConfig {
 			cfg.SocksTimeout = DefaultSocksTimeout
 		}
 
-
 		GlobalConfig = cfg
-		log.Printf("Configuration loaded: %+v", *GlobalConfig)
+		log.Printf("Configuration loaded: NumInstances=%d, APIPort=%s, CommonSOCKS=%s, CommonDNS=%s", cfg.NumTorInstances, cfg.APIPort, cfg.CommonSocksPort, cfg.CommonDNSPort)
 	})
 	return GlobalConfig
 }
