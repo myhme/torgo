@@ -1,0 +1,22 @@
+# Tor configuration template for system-wide transparent proxying
+# DataDirectory and User will be set/confirmed by entrypoint.sh
+
+Log notice stdout
+RunAsDaemon 0
+
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsOnResolve 1
+TransPort 0.0.0.0:9040
+
+DNSPort 0.0.0.0:9053
+DNSListenAddress 0.0.0.0
+
+SocksPort 0
+ControlPort 0
+CookieAuthentication 0
+
+AvoidDiskWrites 1
+
+# Optional: Specify Exit Nodes for the system-wide proxy if desired
+# ExitNodes {us},{gb}
+# StrictNodes 1

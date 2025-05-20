@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torgo Status & Adblock Control</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background-color: #f0f2f5; color: #1c1e21; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .container { width: 90%; max-width: 1200px; background-color: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1, h2 { text-align: center; color: #1877f2; margin-bottom: 20px; }
+        h2 { margin-top: 30px; border-bottom: 1px solid #ddd; padding-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; font-size: 0.9em; }
+        th { background-color: #f0f2f5; font-weight: 600; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        .healthy { color: #28a745; }
+        .unhealthy { color: #dc3545; font-weight: bold; }
+        .status-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+        .healthy-dot { background-color: #28a745; }
+        .unhealthy-dot { background-color: #dc3545; }
+        .loader { border: 5px solid #f0f2f5; border-top: 5px solid #1877f2; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 30px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .message { text-align: center; padding: 12px; margin-top: 15px; border-radius: 6px; font-size: 0.95em; }
+        .error-message { color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb;}
+        .info-message { color: #0c5460; background-color: #d1ecf1; border: 1px solid #bee5eb;}
+        .summary, .adblock-controls { margin-bottom: 25px; padding: 20px; background-color: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 6px; }
+        .adblock-controls input[type="text"], .adblock-controls input[type="number"] { padding: 10px; margin-right: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 0.9em; width: calc(100% - 120px); max-width: 400px; }
+        .adblock-controls button { padding: 10px 15px; background-color: #1877f2; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9em; transition: background-color 0.2s; }
+        .adblock-controls button:hover { background-color: #166fe5; }
+        #adblockUrlList { list-style-type: none; padding-left: 0; }
+        #adblockUrlList li { margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; background-color: #fff; padding: 8px; border-radius: 4px; border: 1px solid #eee; }
+        #adblockUrlList button { margin-left: 10px; background-color: #e74c3c; font-size: 0.85em; padding: 5px 8px;}
+        #adblockUrlList button:hover { background-color: #c0392b; }
+        .control-group { margin-bottom: 15px; }
+        .control-group label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 0.9em;}
+        .footer { text-align: center; margin-top: 30px; font-size: 0.8em; color: #606770; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Torgo Status & Adblock Control</h1>
+
+        <div class="summary">
+            <h2>Circuit Summary</h2>
+            <p>Total Circuits: <strong id="total-circuits">0</strong></p>
+            <p>Healthy: <strong id="healthy-circuits" class="healthy">0</strong></p>
+            <p>Unhealthy: <strong id="unhealthy-circuits" class="unhealthy">0</strong></p>
+            <p>Last Updated: <span id="last-updated">N/A</span></p>
+        </div>
+
+        <div class="adblock-controls">
+            <h2>Adblock Management</h2>
+            <div id="adblock-info-message" class="message info-message" style="display:none;"></div>
+            <div id="adblock-error-message" class="message error-message" style="display:none;"></div>
+            
+            <div class="control-group">
+                <label for="currentAdblockInterval">Current Update Interval:</label>
+                <span id="currentAdblockInterval">N/A</span> seconds
+            </div>
+            <div class="control-group">
+                <label for="lastAdblockUpdate">Last Adblock List Update:</label>
+                <span id="lastAdblockUpdate">N/A</span>
+            </div>
+
+            <button id="updateAdblockNowBtn">Update Adblock Lists Now</button>
+            
+            <h3>Adblock URLs:</h3>
+            <ul id="adblockUrlList"></ul>
+            <div class="control-group">
+                <label for="newAdblockUrl">Add New Adblock URL:</label>
+                <input type="text" id="newAdblockUrl" placeholder="https://example.com/hosts.txt">
+                <button id="addAdblockUrlBtn">Add URL</button>
+            </div>
+            <p><small>Note: URL list changes made here are for the current session of the torgo application. For persistence across restarts, configure URLs via the <code>-adblockUrls</code> startup flag.</small></p>
+        </div>
+
+        <div id="loader" class="loader" style="display:none;"></div>
+        <div id="error-message" class="message error-message" style="display:none;"></div>
+        
+        <h2>Tor Circuit Details</h2>
+        <table id="circuitsTable">
+            <thead>
+                <tr>
+                    <th>Status</th><th>Port</th><th>IP Address</th><th>Country</th><th>City</th><th>Load</th><th>Last Checked</th><th>Created At</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    <div class="footer">
+        Torgo Monitoring UI
+    </div>
+
+    <script>
+        const tableBody = document.querySelector("#circuitsTable tbody");
+        const loader = document.getElementById("loader");
+        const errorMessageDiv = document.getElementById("error-message");
+        const totalCircuitsSpan = document.getElementById("total-circuits");
+        const healthyCircuitsSpan = document.getElementById("healthy-circuits");
+        const unhealthyCircuitsSpan = document.getElementById("unhealthy-circuits");
+        const lastUpdatedSpan = document.getElementById("last-updated");
+
+        const adblockInfoMsg = document.getElementById("adblock-info-message");
+        const adblockErrorMsg = document.getElementById("adblock-error-message");
+        const currentAdblockIntervalSpan = document.getElementById("currentAdblockInterval");
+        const lastAdblockUpdateSpan = document.getElementById("lastAdblockUpdate");
+        const updateAdblockNowBtn = document.getElementById("updateAdblockNowBtn");
+        const adblockUrlListUl = document.getElementById("adblockUrlList");
+        const newAdblockUrlInput = document.getElementById("newAdblockUrl");
+        const addAdblockUrlBtn = document.getElementById("addAdblockUrlBtn");
+        
+        let globalAccessKey = ""; 
+
+        function showUIMessage(element, message, isError = false) {
+            element.textContent = message;
+            element.style.display = 'block';
+            element.className = isError ? 'message error-message' : 'message info-message';
+            setTimeout(() => { element.style.display = 'none'; }, 7000);
+        }
+        
+        function getApiHeaders() {
+            const headers = {'Content-Type': 'application/json'};
+            if (globalAccessKey) {
+                headers['access_key'] = globalAccessKey;
+            }
+            return headers;
+        }
+
+        async function fetchCircuitStatus() {
+            loader.style.display = "block";
+            errorMessageDiv.style.display = "none";
+            try {
+                const response = await fetch('/api/circuits');
+                if (!response.ok) throw new Error(`Circuits API Error: ${response.status} ${response.statusText}`);
+                const circuits = await response.json();
+                populateCircuitsTable(circuits);
+                updateCircuitsSummary(circuits);
+                lastUpdatedSpan.textContent = new Date().toLocaleTimeString();
+            } catch (error) {
+                console.error('Error fetching circuit status:', error);
+                tableBody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:red;">Failed to load circuit data.</td></tr>';
+                showUIMessage(errorMessageDiv, `Circuit Data Error: ${error.message}.`, true);
+            } finally {
+                loader.style.display = "none";
+            }
+        }
+
+        function populateCircuitsTable(circuits) {
+            tableBody.innerHTML = '';
+            if (!circuits || circuits.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="8" style="text-align:center;">No Tor circuits to display.</td></tr>';
+                return;
+            }
+            circuits.forEach(c => {
+                const r = tableBody.insertRow(), sc = r.insertCell(), ind = document.createElement('span');
+                ind.className = 'status-indicator ' + (c.IsHealthy ? 'healthy-dot' : 'unhealthy-dot');
+                sc.appendChild(ind); sc.appendChild(document.createTextNode(c.IsHealthy ? 'Healthy' : 'Unhealthy'));
+                sc.className = c.IsHealthy ? 'healthy' : 'unhealthy';
+                r.insertCell().textContent = c.Port || 'N/A';
+                r.insertCell().textContent = c.IPAddress || 'N/A';
+                r.insertCell().textContent = c.Country || 'N/A';
+                r.insertCell().textContent = c.City || 'N/A';
+                r.insertCell().textContent = c.Load !== undefined ? c.Load : 'N/A';
+                r.insertCell().textContent = c.LastChecked ? new Date(c.LastChecked).toLocaleString() : 'N/A';
+                r.insertCell().textContent = c.CreatedAt ? new Date(c.CreatedAt).toLocaleString() : 'N/A';
+            });
+        }
+        
+        function updateCircuitsSummary(circuits) {
+            if (!circuits) circuits = [];
+            totalCircuitsSpan.textContent = circuits.length;
+            const healthyCount = circuits.filter(c => c.IsHealthy).length;
+            healthyCircuitsSpan.textContent = healthyCount;
+            unhealthyCircuitsSpan.textContent = circuits.length - healthyCount;
+        }
+
+        async function fetchAdblockConfig() {
+            try {
+                const response = await fetch('/api/adblock/config');
+                if (!response.ok) throw new Error(`Adblock Config API Error: ${response.status} ${response.statusText}`);
+                const config = await response.json();
+                currentAdblockIntervalSpan.textContent = config.update_interval_seconds !== undefined ? config.update_interval_seconds : 'N/A';
+                lastAdblockUpdateSpan.textContent = config.last_update_time ? new Date(config.last_update_time).toLocaleString() : 'N/A';
+                
+                adblockUrlListUl.innerHTML = '';
+                if (config.urls && config.urls.length > 0) {
+                    config.urls.forEach(url => {
+                        const li = document.createElement('li');
+                        const urlSpan = document.createElement('span');
+                        urlSpan.textContent = url;
+                        li.appendChild(urlSpan);
+                        
+                        const removeBtn = document.createElement('button');
+                        removeBtn.textContent = 'Remove';
+                        removeBtn.onclick = () => removeAdblockUrl(url);
+                        li.appendChild(removeBtn);
+                        adblockUrlListUl.appendChild(li);
+                    });
+                } else {
+                    adblockUrlListUl.innerHTML = '<li>No adblock URLs currently configured.</li>';
+                }
+            } catch (error) {
+                console.error('Error fetching adblock config:', error);
+                showUIMessage(adblockErrorMsg, `Adblock Config Error: ${error.message}.`, true);
+            }
+        }
+
+        async function triggerAdblockUpdate() {
+            showUIMessage(adblockInfoMsg, "Triggering adblock list update...", false);
+            try {
+                const response = await fetch('/api/adblock/update', { method: 'POST', headers: getApiHeaders() });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || `Adblock Update API Error: ${response.status} ${response.statusText}`);
+                showUIMessage(adblockInfoMsg, result.status || 'Adblock list update triggered successfully.', false);
+                setTimeout(fetchAdblockConfig, 3000); // Refresh config display after a short delay
+            } catch (error) {
+                console.error('Error triggering adblock update:', error);
+                showUIMessage(adblockErrorMsg, `Adblock Update Error: ${error.message}.`, true);
+            }
+        }
+        updateAdblockNowBtn.onclick = triggerAdblockUpdate;
+
+        async function addAdblockUrl() {
+            const newUrl = newAdblockUrlInput.value.trim();
+            if (!newUrl) {
+                alert("Please enter a URL for the adblock list.");
+                return;
+            }
+            showUIMessage(adblockInfoMsg, "Adding adblock URL...", false);
+            try {
+                const response = await fetch('/api/adblock/urls', {
+                    method: 'POST',
+                    headers: getApiHeaders(),
+                    body: JSON.stringify({ url: newUrl })
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || `Add Adblock URL API Error: ${response.status} ${response.statusText}`);
+                showUIMessage(adblockInfoMsg, result.status || 'Adblock URL processed.', false);
+                newAdblockUrlInput.value = '';
+                fetchAdblockConfig(); 
+            } catch (error) {
+                console.error('Error adding adblock URL:', error);
+                showUIMessage(adblockErrorMsg, `Add Adblock URL Error: ${error.message}.`, true);
+            }
+        }
+        addAdblockUrlBtn.onclick = addAdblockUrl;
+
+        async function removeAdblockUrl(urlToRemove) {
+            if (!confirm(`Are you sure you want to remove the adblock URL: ${urlToRemove}?`)) return;
+            showUIMessage(adblockInfoMsg, "Removing adblock URL...", false);
+            try {
+                const response = await fetch('/api/adblock/url', {
+                    method: 'DELETE',
+                    headers: getApiHeaders(),
+                    body: JSON.stringify({ url: urlToRemove })
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || `Remove Adblock URL API Error: ${response.status} ${response.statusText}`);
+                showUIMessage(adblockInfoMsg, result.status || 'Adblock URL removed.', false);
+                fetchAdblockConfig(); 
+            } catch (error) {
+                console.error('Error removing adblock URL:', error);
+                showUIMessage(adblockErrorMsg, `Remove Adblock URL Error: ${error.message}.`, true);
+            }
+        }
+        
+        // Initial setup and periodic refresh
+        function initializeApp() {
+            const storedKey = localStorage.getItem("torgoAccessKey");
+            if (storedKey) {
+                globalAccessKey = storedKey;
+            } else {
+                // Only prompt if key is not already stored for the session
+                // This is a very basic way to handle it; for production, a login would be better.
+                // If no key is needed (app started without -key flag), this will be skipped by the server.
+                const promptedKey = prompt("Enter API access_key if required for management actions (leave blank if none):", "");
+                if (promptedKey) {
+                    globalAccessKey = promptedKey;
+                    localStorage.setItem("torgoAccessKey", globalAccessKey); 
+                }
+            }
+
+            fetchCircuitStatus();
+            fetchAdblockConfig();
+            setInterval(fetchCircuitStatus, 7000); 
+            setInterval(fetchAdblockConfig, 30000); 
+        }
+
+        initializeApp();
+    </script>
+</body>
+</html>
