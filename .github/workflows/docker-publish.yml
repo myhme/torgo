@@ -65,13 +65,3 @@ jobs:
 
     outputs:
       image_tags: ${{ steps.meta.outputs.tags }}
-
-  # Optional: Notify on success or failure
-  # notify:
-  // needs: build-and-push-docker-image
-  # if: always() # Run even if the build job fails
-  # runs-on: ubuntu-latest
-  # steps:
-  // - name: Send notification
-  # run: echo "Docker build and push status: ${{ needs.build-and-push-docker-image.result }}. Tags: ${{ needs.build-and-push-docker-image.outputs.image_tags }}"
-  # Add your preferred notification method here (e.g., Slack, email)
