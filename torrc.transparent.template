@@ -1,17 +1,17 @@
 # Tor configuration template for system-wide transparent proxying
-# DataDirectory and User will be set/confirmed by entrypoint.sh
+# DataDirectory will be set by entrypoint.sh
+# The 'User' directive is removed because entrypoint.sh starts Tor as the correct user.
 
 Log notice stdout
 RunAsDaemon 0
 
 VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
-TransPort 0.0.0.0:9040
+TransPort 127.0.0.1:9040  # Listen on loopback for internal redirection
+DNSPort 127.0.0.1:9053    # Listen on loopback for internal redirection
+# DNSListenAddress is obsolete and removed
 
-DNSPort 0.0.0.0:9053
-DNSListenAddress 0.0.0.0
-
-SocksPort 0
+SocksPort 0 # This instance is for transparent proxying only
 ControlPort 0
 CookieAuthentication 0
 
