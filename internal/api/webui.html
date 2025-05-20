@@ -17,16 +17,17 @@
         .status-healthy { background-color: green; }
         .status-unhealthy { background-color: red; }
         .status-unknown { background-color: orange; }
-        button { padding: 8px 12px; margin-top: 10px; margin-right: 5px; border: none; border-radius: 4px; cursor: pointer; background-color: #3498db; color: white; }
+        button { padding: 8px 12px; margin-top: 10px; margin-right: 5px; border: none; border-radius: 4px; cursor: pointer; background-color: #3498db; color: white; font-size: 0.9em; }
         button:hover { background-color: #2980b9; }
         button:disabled { background-color: #bdc3c7; cursor: not-allowed; }
+        .btn-small { padding: 5px 8px; font-size: 0.8em; margin-top: 5px;}
         .loading-spinner {
             border: 2px solid #f3f3f3; border-top: 2px solid #3498db; border-radius: 50%;
             width: 14px; height: 14px; animation: spin 1s linear infinite;
             display: inline-block; margin-left: 5px; vertical-align: middle;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        pre { background-color: #eee; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
+        pre { background-color: #eee; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 0.85em; }
         #statsModal {
             display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%;
             overflow: auto; background-color: rgba(0,0,0,0.4); padding-top: 60px;
@@ -36,6 +37,7 @@
         .close-button:hover, .close-button:focus { color: black; text-decoration: none; cursor: pointer; }
         .info-label { font-weight: 500; color: #555;}
         .info-value { font-family: monospace; color: #2c3e50; font-size: 0.9em; }
+        .card-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top:10px; border-top: 1px solid #eee; padding-top: 10px;}
     </style>
 </head>
 <body>
@@ -49,13 +51,13 @@
             <h2>Common Proxy Status</h2>
             <p>SOCKS5 Proxy (<span id="commonSocksPortDisplay">N/A</span>): <span id="commonSocksStatus">Loading...</span></p>
             <p>DNS Proxy (<span id="commonDnsPortDisplay">N/A</span>): <span id="commonDnsStatus">Loading...</span></p>
-            <p>Last updated: <span id="lastUpdatedTimestamp">Never</span> <button id="refreshAllButton">Refresh All</button></p>
+            <p>Last updated: <span id="lastUpdatedTimestamp">Never</span> <button id="refreshAllButton">Refresh All Data</button></p>
         </section>
 
         <section class="instances-section">
             <h2>Tor Instances (<span id="instanceCount">0</span>)</h2>
             <button id="rotateAllStaggeredButton">Rotate All Healthy Staggered</button>
-            <div id="instancesContainer">
+            <div id="instancesContainer" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px;">
                 </div>
         </section>
 
@@ -71,7 +73,7 @@
     <script>
         const API_BASE_URL = `${window.location.origin}/api/v1`;
         let appDetails = null;
-        let instancesData = {}; // { 1: {health: {}, stats: {}, config: {}, ip: {}}, ... }
+        let instancesData = {}; 
         let refreshIntervalId = null;
         const REFRESH_INTERVAL_MS = 20000; 
 
@@ -97,12 +99,11 @@
                     console.warn(`Fetch error for ${urlPath}: ${response.status} - ${errorText}`);
                     return { error: `HTTP ${response.status}: ${errorText.substring(0, 100)}` };
                 }
-                // Check content type before parsing as JSON
                 const contentType = response.headers.get("content-type");
                 if (contentType && contentType.indexOf("application/json") !== -1) {
                     return await response.json();
                 } else {
-                    return { plain_text_response: await response.text() }; // Handle non-JSON responses
+                    return { plain_text_response: await response.text() }; 
                 }
             } catch (error) {
                 console.warn(`Network error fetching ${urlPath}:`, error);
@@ -146,16 +147,30 @@
                 <p><small><span class="info-label">Control Port:</span> <span id="instance-${instanceId}-control" class="info-value">N/A</span></small></p>
                 <p><small><span class="info-label">Backend SOCKS:</span> <span id="instance-${instanceId}-socks" class="info-value">N/A</span></small></p>
                 <p><small><span class="info-label">Backend DNS:</span> <span id="instance-${instanceId}-dns" class="info-value">N/A</span></small></p>
-                <p><small><span class="info-label">External IP:</span> <span id="instance-${instanceId}-ip" class="info-value">Loading...</span></small></p>
+                <p><small><span class="info-label">External IP:</span> <span id="instance-${instanceId}-ip" class="info-value">Loading...</span> <button id="refresh-ip-btn-${instanceId}" class="btn-small" title="Refresh IP for this instance">🔄 IP</button></small></p>
                 <p><small><span class="info-label">Bootstrap:</span> <span id="instance-${instanceId}-bootstrap" class="info-value">N/A</span></small></p>
                 <p><small><span class="info-label">Version:</span> <span id="instance-${instanceId}-version" class="info-value">N/A</span></small></p>
-                <button id="rotate-btn-${instanceId}">New Circuit <span id="rotate-spinner-${instanceId}" class="loading-spinner" style="display:none;"></span></button>
-                <button id="stats-btn-${instanceId}">View Stats</button>
+                <div class="card-actions">
+                    <button id="rotate-btn-${instanceId}">New Circuit <span id="rotate-spinner-${instanceId}" class="loading-spinner" style="display:none;"></span></button>
+                    <button id="stats-btn-${instanceId}">View Stats</button>
+                    <button id="refresh-instance-btn-${instanceId}" class="btn-small">Refresh Data</button>
+                </div>
             `;
             instancesContainer.appendChild(card);
 
             document.getElementById(`rotate-btn-${instanceId}`).addEventListener('click', () => handleNewCircuitClick(instanceId));
             document.getElementById(`stats-btn-${instanceId}`).addEventListener('click', () => showFullStats(instanceId));
+            document.getElementById(`refresh-instance-btn-${instanceId}`).addEventListener('click', () => {
+                document.getElementById(`instance-${instanceId}-status-text`).textContent = 'Refreshing...';
+                fetchAndRenderInstanceData(instanceId);
+            });
+            document.getElementById(`refresh-ip-btn-${instanceId}`).addEventListener('click', async () => {
+                const ipElem = document.getElementById(`instance-${instanceId}-ip`);
+                ipElem.textContent = 'Fetching IP...';
+                const ipData = await fetchData(`/tor${instanceId}/ip`);
+                instancesData[instanceId] = { ...instancesData[instanceId], ip: ipData };
+                updateInstanceCardUI(instanceId, instancesData[instanceId]);
+            });
         }
 
         function updateInstanceCardUI(instanceId, data) {
@@ -166,12 +181,12 @@
             const versionText = getElem('version');
             const controlText = getElem('control');
             const socksText = getElem('socks');
-            const dnsText = getElem('dns'); // New element for DNS port
-            const ipText = getElem('ip');   // New element for IP
+            const dnsText = getElem('dns');
+            const ipText = getElem('ip');
 
             if (!statusDot) return; 
 
-            if (data.health && !data.health.error) {
+            if (data && data.health && !data.health.error) {
                 statusDot.className = data.health.cached_is_healthy ? 'status-dot status-healthy' : 'status-dot status-unhealthy';
                 statusText.textContent = data.health.cached_is_healthy ? 'Healthy' : 'Unhealthy';
                  if (data.health.last_health_check_at) {
@@ -179,32 +194,32 @@
                 }
             } else {
                 statusDot.className = 'status-dot status-unknown';
-                statusText.textContent = (data.health && data.health.error) ? `Error: ${data.health.error}` : 'Health N/A';
+                statusText.textContent = (data && data.health && data.health.error) ? `Error: ${data.health.error}` : 'Health N/A';
             }
 
-            if (data.stats && !data.stats.error) {
+            if (data && data.stats && !data.stats.error) {
                 const bootstrapSummary = data.stats.bootstrap_status ? data.stats.bootstrap_status.match(/SUMMARY="([^"]+)"/) : null;
                 bootstrapText.textContent = bootstrapSummary ? bootstrapSummary[1] : (data.stats.bootstrap_status || 'N/A');
                 versionText.textContent = data.stats.version || "N/A";
             } else {
-                 bootstrapText.textContent = (data.stats && data.stats.error) ? `Error: ${data.stats.error}` : 'Stats N/A';
+                 bootstrapText.textContent = (data && data.stats && data.stats.error) ? `Error: ${data.stats.error}` : 'Stats N/A';
                  versionText.textContent = "N/A";
             }
             
-            if (data.config && !data.config.error) {
+            if (data && data.config && !data.config.error) {
                 controlText.textContent = data.config.control_host || 'N/A';
                 socksText.textContent = data.config.backend_socks_host || 'N/A';
-                dnsText.textContent = data.config.backend_dns_host || 'N/A'; // Display DNS port
+                dnsText.textContent = data.config.backend_dns_host || 'N/A';
             } else {
                 controlText.textContent = 'N/A';
                 socksText.textContent = 'N/A';
                 dnsText.textContent = 'N/A';
             }
 
-            if (data.ip && !data.ip.error) {
-                ipText.textContent = data.ip.IP || (data.ip.plain_text_response ? 'Non-JSON IP' : 'N/A');
+            if (data && data.ip && !data.ip.error) {
+                ipText.textContent = data.ip.IP || (data.ip.plain_text_response ? 'Non-JSON IP ('+ data.ip.plain_text_response.substring(0,30) +'...)' : 'N/A');
             } else {
-                ipText.textContent = (data.ip && data.ip.error) ? `Error: ${data.ip.error}` : 'IP N/A';
+                ipText.textContent = (data && data.ip && data.ip.error) ? `Error: ${data.ip.error}` : 'IP N/A';
             }
         }
         
@@ -238,7 +253,8 @@
             }
             button.disabled = false;
             spinner.style.display = 'none';
-            setTimeout(() => fetchAndRenderInstanceData(instanceId), 2000); 
+            // Fetch data for this specific instance again soon after rotation
+            setTimeout(() => fetchAndRenderInstanceData(instanceId), 3000); 
         }
         
         rotateAllStaggeredButton.onclick = async function() {
@@ -250,7 +266,9 @@
                 if (!response.ok) {
                     throw new Error(`HTTP error ${response.status}`);
                 }
-                alert(`Staggered rotation initiated. Monitor Web UI or server logs for progress.`);
+                // For a truly streaming response, you'd process response.body.getReader()
+                // For this basic UI, we'll just acknowledge and let user check logs/status later via refresh
+                alert(`Staggered rotation initiated. Monitor Web UI or server logs for progress. UI will refresh periodically.`);
 
             } catch (error) {
                 alert(`Error initiating staggered rotation: ${error.message}`);
@@ -297,13 +315,13 @@
                 createInstanceCard(instanceId);
             }
             try {
-                const [health, stats, config, ip] = await Promise.all([ // Fetch IP data as well
+                const [health, stats, config, ip] = await Promise.all([
                     fetchData(`/tor${instanceId}/health`), 
                     fetchData(`/tor${instanceId}/stats`),
                     fetchData(`/tor${instanceId}/config`),
-                    fetchData(`/tor${instanceId}/ip`) // Fetch IP data
+                    fetchData(`/tor${instanceId}/ip`)
                 ]);
-                instancesData[instanceId] = { health, stats, config, ip }; // Store IP data
+                instancesData[instanceId] = { health, stats, config, ip }; 
                 updateInstanceCardUI(instanceId, instancesData[instanceId]);
             } catch (error) {
                  console.error(`Error fetching data bundle for instance ${instanceId}:`, error);
@@ -317,11 +335,11 @@
         }
 
         async function fetchAndRenderAllInstances() {
-            if (!appDetails) {
+            if (!appDetails) { // Ensure appDetails is fetched if not already
                 const details = await fetchData("/app-details");
-                if (details.error || !details.num_instances) { 
-                     appDetails = { num_instances: 0, common_socks_port: 'N/A', common_dns_port: 'N/A' }; // Fallback
-                     console.error("Error fetching application details or no instances configured:", details.error);
+                if (details.error || typeof details.num_instances === 'undefined') { 
+                     appDetails = { num_instances: 0, common_socks_port: 'N/A', common_dns_port: 'N/A' }; 
+                     console.error("Error fetching application details or num_instances missing:", details.error);
                 } else {
                     appDetails = details;
                 }
@@ -331,20 +349,19 @@
             commonSocksPortDisplay.textContent = appDetails.common_socks_port || 'N/A';
             commonDnsPortDisplay.textContent = appDetails.common_dns_port || 'N/A';
 
-
-            const numInstances = appDetails.num_instances;
+            const numInstances = appDetails.num_instances || 0; // Use 0 if undefined
             if (numInstances === 0) {
                  instancesContainer.innerHTML = '<p>No Tor instances configured.</p>';
-                 updateCommonProxyStatusDisplay();
+                 updateCommonProxyStatusDisplay(); // Still update common status
                  return;
             }
             
             const instancePromises = [];
-            // Only clear if absolutely necessary or if number of instances changes.
-            // For now, createInstanceCard handles not re-creating existing cards.
-            // instancesContainer.innerHTML = ''; 
-
             for (let i = 1; i <= numInstances; i++) {
+                // Ensure card exists before pushing promise to fetch data for it
+                if (!document.getElementById(`instance-${i}-card`)) {
+                    createInstanceCard(i);
+                }
                 instancePromises.push(fetchAndRenderInstanceData(i));
             }
             

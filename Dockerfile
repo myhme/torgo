@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-w -s" -installsuffix cgo -o 
 # ---- Runtime Stage ----
 FROM alpine:3.21
 # Install Tor, su-exec, ca-certificates, coreutils, and curl (for healthcheck)
-RUN apk add --no-cache tor su-exec ca-certificates coreutils curl
+RUN apk add --no-cache tor su-exec ca-certificates coreutils curl procps # procps for sysctl
 
 WORKDIR /app
 # Copy the built application from the builder stage
@@ -37,18 +37,25 @@ RUN chmod +x /usr/local/bin/docker-healthcheck.sh
 RUN mkdir -p /var/lib/tor
 RUN mkdir -p /var/run/tor
 
+# Disable IPv6 at the container level
+RUN echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf && \
+    echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.conf && \
+    echo "net.ipv6.conf.lo.disable_ipv6 = 1" >> /etc/sysctl.conf
+# Note: Applying sysctl settings usually requires either a reboot or `sysctl -p`.
+# In Docker, these settings might be applied when the container starts if the entrypoint allows,
+# or they might require the container to be run with --privileged or specific sysctl capabilities
+# depending on the Docker host and version. For a non-privileged container, this sets the stage.
+# The entrypoint.sh could also attempt `sysctl -p` if needed, but that requires root.
+
 # Expose the Go API port and the new common SOCKS/DNS proxy ports
-EXPOSE 8080
+EXPOSE 8080 
 # Go management API (configurable via API_PORT)
-EXPOSE 9000
+EXPOSE 9000 
 # Common SOCKS proxy port (configurable via COMMON_SOCKS_PROXY_PORT)
-EXPOSE 5300
+EXPOSE 5300 
 # Common DNS proxy port (UDP/TCP) (configurable via COMMON_DNS_PROXY_PORT)
 
 # Docker Healthcheck
-# It will use the environment variables set in docker-compose.yml or defaults in the script.
-# Adjust interval, timeout, retries, and start period as needed.
-# Start period gives the container time to initialize before health checks begin.
 HEALTHCHECK --interval=60s --timeout=15s --retries=3 --start-period=2m \
   CMD /usr/local/bin/docker-healthcheck.sh
 
