@@ -10,3 +10,12 @@ PidFile __PIDFILE__
 # Consider adding these for better stability with multiple instances if issues arise:
 # AvoidDiskWrites 1 # Might reduce I/O load, but check implications for state
 # MaxMemInQueues 20MB # Example, adjust based on resources
+ClientUseIPv6 0
+ClientUseIPv4 1
+IPv6Exit 0
+ClientOnly 1
+AvoidDiskWrites 1
+SafeLogging 1
+CircuitPadding 1
+ReducedCircuitPadding 0
+MaxCircuitDirtiness 300
