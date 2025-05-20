@@ -7,15 +7,22 @@ CookieAuthentication 1
 Log notice stdout
 PidFile __PIDFILE__
 
-# Consider adding these for better stability with multiple instances if issues arise:
-# AvoidDiskWrites 1 # Might reduce I/O load, but check implications for state
-# MaxMemInQueues 20MB # Example, adjust based on resources
+# Disable IPv6 for client connections and exits
 ClientUseIPv6 0
-ClientUseIPv4 1
 IPv6Exit 0
+
+# Ensure IPv4 is used by clients
+ClientUseIPv4 1
+
+# Configure as a client-only node (not a relay)
 ClientOnly 1
+
+# Performance and Security/Privacy enhancements
 AvoidDiskWrites 1
 SafeLogging 1
 CircuitPadding 1
 ReducedCircuitPadding 0
 MaxCircuitDirtiness 300
+
+# Consider adding these for better stability with multiple instances if issues arise:
+# MaxMemInQueues 20MB # Example, adjust based on resources

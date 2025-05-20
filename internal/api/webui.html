@@ -34,6 +34,8 @@
         .modal-content { background-color: #fefefe; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 700px; border-radius: 5px; }
         .close-button { color: #aaa; float: right; font-size: 28px; font-weight: bold; }
         .close-button:hover, .close-button:focus { color: black; text-decoration: none; cursor: pointer; }
+        .info-label { font-weight: 500; color: #555;}
+        .info-value { font-family: monospace; color: #2c3e50; font-size: 0.9em; }
     </style>
 </head>
 <body>
@@ -69,9 +71,9 @@
     <script>
         const API_BASE_URL = `${window.location.origin}/api/v1`;
         let appDetails = null;
-        let instancesData = {}; // { 1: {health: {}, stats: {}, config: {}}, ... }
+        let instancesData = {}; // { 1: {health: {}, stats: {}, config: {}, ip: {}}, ... }
         let refreshIntervalId = null;
-        const REFRESH_INTERVAL_MS = 20000;
+        const REFRESH_INTERVAL_MS = 20000; 
 
         const commonSocksPortDisplay = document.getElementById('commonSocksPortDisplay');
         const commonSocksStatus = document.getElementById('commonSocksStatus');
@@ -93,9 +95,15 @@
                 if (!response.ok) {
                     const errorText = await response.text();
                     console.warn(`Fetch error for ${urlPath}: ${response.status} - ${errorText}`);
-                    return { error: `HTTP ${response.status}: ${errorText.substring(0, 100)}` }; // Limit error length
+                    return { error: `HTTP ${response.status}: ${errorText.substring(0, 100)}` };
                 }
-                return await response.json();
+                // Check content type before parsing as JSON
+                const contentType = response.headers.get("content-type");
+                if (contentType && contentType.indexOf("application/json") !== -1) {
+                    return await response.json();
+                } else {
+                    return { plain_text_response: await response.text() }; // Handle non-JSON responses
+                }
             } catch (error) {
                 console.warn(`Network error fetching ${urlPath}:`, error);
                 return { error: error.message };
@@ -117,7 +125,7 @@
                 try { 
                     return JSON.parse(responseText);
                 } catch (e) { 
-                    return responseText; // Return as text if not JSON (e.g. simple "OK" string)
+                    return responseText; 
                 }
             } catch (error) {
                 console.error(`POST error for ${urlPath}:`, error);
@@ -127,18 +135,20 @@
 
         function createInstanceCard(instanceId) {
             let card = document.getElementById(`instance-${instanceId}-card`);
-            if (card) return; // Already exists
+            if (card) return; 
 
             card = document.createElement('div');
             card.id = `instance-${instanceId}-card`;
             card.className = 'instance-card';
             card.innerHTML = `
                 <h3>Instance ${instanceId}</h3>
-                <p>Status: <span id="instance-${instanceId}-status-dot" class="status-dot status-unknown"></span><span id="instance-${instanceId}-status-text">Loading...</span></p>
-                <p><small>Control: <span id="instance-${instanceId}-control">N/A</span></small></p>
-                <p><small>SOCKS: <span id="instance-${instanceId}-socks">N/A</span></small></p>
-                <p><small>Bootstrap: <span id="instance-${instanceId}-bootstrap">N/A</span></small></p>
-                <p><small>Version: <span id="instance-${instanceId}-version">N/A</span></small></p>
+                <p><span class="info-label">Status:</span> <span id="instance-${instanceId}-status-dot" class="status-dot status-unknown"></span><span id="instance-${instanceId}-status-text">Loading...</span></p>
+                <p><small><span class="info-label">Control Port:</span> <span id="instance-${instanceId}-control" class="info-value">N/A</span></small></p>
+                <p><small><span class="info-label">Backend SOCKS:</span> <span id="instance-${instanceId}-socks" class="info-value">N/A</span></small></p>
+                <p><small><span class="info-label">Backend DNS:</span> <span id="instance-${instanceId}-dns" class="info-value">N/A</span></small></p>
+                <p><small><span class="info-label">External IP:</span> <span id="instance-${instanceId}-ip" class="info-value">Loading...</span></small></p>
+                <p><small><span class="info-label">Bootstrap:</span> <span id="instance-${instanceId}-bootstrap" class="info-value">N/A</span></small></p>
+                <p><small><span class="info-label">Version:</span> <span id="instance-${instanceId}-version" class="info-value">N/A</span></small></p>
                 <button id="rotate-btn-${instanceId}">New Circuit <span id="rotate-spinner-${instanceId}" class="loading-spinner" style="display:none;"></span></button>
                 <button id="stats-btn-${instanceId}">View Stats</button>
             `;
@@ -156,8 +166,10 @@
             const versionText = getElem('version');
             const controlText = getElem('control');
             const socksText = getElem('socks');
+            const dnsText = getElem('dns'); // New element for DNS port
+            const ipText = getElem('ip');   // New element for IP
 
-            if (!statusDot) return; // Card might not be fully ready if called too early
+            if (!statusDot) return; 
 
             if (data.health && !data.health.error) {
                 statusDot.className = data.health.cached_is_healthy ? 'status-dot status-healthy' : 'status-dot status-unhealthy';
@@ -182,9 +194,17 @@
             if (data.config && !data.config.error) {
                 controlText.textContent = data.config.control_host || 'N/A';
                 socksText.textContent = data.config.backend_socks_host || 'N/A';
+                dnsText.textContent = data.config.backend_dns_host || 'N/A'; // Display DNS port
             } else {
                 controlText.textContent = 'N/A';
                 socksText.textContent = 'N/A';
+                dnsText.textContent = 'N/A';
+            }
+
+            if (data.ip && !data.ip.error) {
+                ipText.textContent = data.ip.IP || (data.ip.plain_text_response ? 'Non-JSON IP' : 'N/A');
+            } else {
+                ipText.textContent = (data.ip && data.ip.error) ? `Error: ${data.ip.error}` : 'IP N/A';
             }
         }
         
@@ -230,8 +250,6 @@
                 if (!response.ok) {
                     throw new Error(`HTTP error ${response.status}`);
                 }
-                // For streaming, you'd typically read response.body with a ReadableStream
-                // For this basic UI, we'll just acknowledge and let user check logs/status later
                 alert(`Staggered rotation initiated. Monitor Web UI or server logs for progress.`);
 
             } catch (error) {
@@ -259,7 +277,7 @@
             commonSocksPortDisplay.textContent = (appDetails && appDetails.common_socks_port) ? appDetails.common_socks_port : 'N/A';
             commonDnsPortDisplay.textContent = (appDetails && appDetails.common_dns_port) ? appDetails.common_dns_port : 'N/A';
 
-            if (!appDetails) { // appDetails not yet fetched
+            if (!appDetails) { 
                 commonSocksStatus.textContent = 'Loading app details...';
                 commonDnsStatus.textContent = 'Loading app details...';
             } else if (configuredInstances === 0) {
@@ -279,45 +297,42 @@
                 createInstanceCard(instanceId);
             }
             try {
-                const [health, stats, config] = await Promise.all([
-                    fetchData(`/tor${instanceId}/health`),
+                const [health, stats, config, ip] = await Promise.all([ // Fetch IP data as well
+                    fetchData(`/tor${instanceId}/health`), 
                     fetchData(`/tor${instanceId}/stats`),
-                    fetchData(`/tor${instanceId}/config`)
+                    fetchData(`/tor${instanceId}/config`),
+                    fetchData(`/tor${instanceId}/ip`) // Fetch IP data
                 ]);
-                instancesData[instanceId] = { health, stats, config };
+                instancesData[instanceId] = { health, stats, config, ip }; // Store IP data
                 updateInstanceCardUI(instanceId, instancesData[instanceId]);
             } catch (error) {
                  console.error(`Error fetching data bundle for instance ${instanceId}:`, error);
                  updateInstanceCardUI(instanceId, { 
                      health: {error: 'Fetch bundle failed'}, 
                      stats: {error: 'Fetch bundle failed'}, 
-                     config: {error: 'Fetch bundle failed'} 
+                     config: {error: 'Fetch bundle failed'},
+                     ip: {error: 'Fetch bundle failed'} 
                  });
             }
         }
 
-
         async function fetchAndRenderAllInstances() {
             if (!appDetails) {
-                const num = await fetchData("/app-details").then(d => d.num_instances || 0);
-                if (num === 0 && !appDetails) { 
-                    if (!appDetails) appDetails = { num_instances: 0 }; // Ensure appDetails is not null
-                    instancesContainer.innerHTML = '<p>Error fetching application details or no instances configured.</p>';
-                    updateCommonProxyStatusDisplay(); // Update with current appDetails
-                    return;
+                const details = await fetchData("/app-details");
+                if (details.error || !details.num_instances) { 
+                     appDetails = { num_instances: 0, common_socks_port: 'N/A', common_dns_port: 'N/A' }; // Fallback
+                     console.error("Error fetching application details or no instances configured:", details.error);
+                } else {
+                    appDetails = details;
                 }
-                // If fetchAppDetails was successful, appDetails global var is set
             }
-             if (!appDetails) { // Still no appDetails, something went wrong
-                console.error("App details could not be fetched for rendering instances.");
-                instancesContainer.innerHTML = '<p>Critical error: Could not fetch application details.</p>';
-                updateCommonProxyStatusDisplay();
-                return;
-            }
+            
+            instanceCountDisplay.textContent = appDetails.num_instances || 0;
+            commonSocksPortDisplay.textContent = appDetails.common_socks_port || 'N/A';
+            commonDnsPortDisplay.textContent = appDetails.common_dns_port || 'N/A';
 
 
             const numInstances = appDetails.num_instances;
-            instanceCountDisplay.textContent = numInstances; // Update count here
             if (numInstances === 0) {
                  instancesContainer.innerHTML = '<p>No Tor instances configured.</p>';
                  updateCommonProxyStatusDisplay();
@@ -325,7 +340,9 @@
             }
             
             const instancePromises = [];
-            // instancesContainer.innerHTML = ''; // Clear only if we are sure we are re-rendering all
+            // Only clear if absolutely necessary or if number of instances changes.
+            // For now, createInstanceCard handles not re-creating existing cards.
+            // instancesContainer.innerHTML = ''; 
 
             for (let i = 1; i <= numInstances; i++) {
                 instancePromises.push(fetchAndRenderInstanceData(i));
@@ -342,26 +359,10 @@
         
         refreshAllButton.addEventListener('click', () => {
             lastUpdatedTimestamp.textContent = 'Refreshing...';
-            // Clear existing instance data to force full re-fetch and re-render
-            // instancesData = {}; 
-            // instancesContainer.innerHTML = ''; // Optionally clear cards for visual refresh
             fetchAndRenderAllInstances();
         });
 
         async function initializeUI() {
-            appDetails = await fetchData("/app-details"); // Fetch app details first
-            if (appDetails.error) {
-                console.error("Initialization failed: could not fetch app details.", appDetails.error);
-                commonSocksStatus.textContent = `Error: ${appDetails.error}`;
-                commonDnsStatus.textContent = `Error: ${appDetails.error}`;
-                instanceCountDisplay.textContent = 'Error';
-                return;
-            }
-            commonSocksPortDisplay.textContent = appDetails.common_socks_port || 'N/A';
-            commonDnsPortDisplay.textContent = appDetails.common_dns_port || 'N/A';
-            instanceCountDisplay.textContent = appDetails.num_instances || 0;
-
-
             await fetchAndRenderAllInstances(); 
             if (refreshIntervalId) clearInterval(refreshIntervalId);
             refreshIntervalId = setInterval(fetchAndRenderAllInstances, REFRESH_INTERVAL_MS);
