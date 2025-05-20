@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync" // Added for WaitGroup
 	"syscall"
 	"time"
 
@@ -20,7 +21,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
 	log.Println("Starting torgo application...")
 
-	appCfg := config.LoadConfig() // Load configuration once
+	appCfg := config.LoadConfig()
 
 	log.Printf("Initializing 'torgo' for %d backend Tor instance(s). Stagger delay: %v", appCfg.NumTorInstances, appCfg.RotationStaggerDelay)
 	log.Printf("Common SOCKS on port: %s, Common DNS on port: %s, Management API on port: %s", appCfg.CommonSocksPort, appCfg.CommonDNSPort, appCfg.APIPort)
@@ -28,15 +29,29 @@ func main() {
 	backendInstances := make([]*torinstance.Instance, appCfg.NumTorInstances)
 	for i := 0; i < appCfg.NumTorInstances; i++ {
 		instanceID := i + 1
-		// Pass appCfg to New, so instance methods can access global settings like timeouts
-		backendInstances[i] = torinstance.New(instanceID, appCfg) 
+		backendInstances[i] = torinstance.New(instanceID, appCfg)
 	}
 
-	// Create a cancellable context for graceful shutdown
 	mainCtx, cancel := context.WithCancel(context.Background())
-	defer cancel() // Ensure cancel is called eventually to clean up resources if main exits early
+	defer cancel()
 
-	// Start health monitoring
+	// Perform initial health checks synchronously before starting proxies
+	log.Println("Performing initial health checks for all instances before starting proxy servers...")
+	var initialHealthCheckWG sync.WaitGroup
+	for _, instance := range backendInstances {
+		initialHealthCheckWG.Add(1)
+		go func(inst *torinstance.Instance) {
+			defer initialHealthCheckWG.Done()
+			// Use a separate context for initial checks that can be shorter if needed,
+			// or mainCtx if they should also be cancellable by shutdown signal.
+			// For simplicity, using mainCtx here.
+			inst.CheckHealth(mainCtx)
+		}(instance)
+	}
+	initialHealthCheckWG.Wait()
+	log.Println("Initial health checks completed for all instances.")
+
+	// Start periodic health monitoring (will also run its own first check, which is fine)
 	go health.Monitor(mainCtx, backendInstances, appCfg)
 
 	// Start common SOCKS5 proxy server
@@ -45,24 +60,19 @@ func main() {
 	// Start common DNS proxy server
 	go proxy.StartDNSProxyServer(backendInstances, appCfg)
 
-	// Setup HTTP API router
-	// The MasterAPIRouter now directly uses the instances and appCfg
-	httpMux := http.NewServeMux() // Use a new ServeMux for clarity
-	httpMux.HandleFunc("/webui", api.WebUIHandler) // Serve HTML at /webui
-	httpMux.HandleFunc("/webui/", api.WebUIHandler) // Also handle if user types /webui/
-
-	// API routes
-	httpMux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) { // Catch-all for API
+	httpMux := http.NewServeMux()
+	httpMux.HandleFunc("/webui", api.WebUIHandler)
+	httpMux.HandleFunc("/webui/", api.WebUIHandler)
+	httpMux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
 		api.MasterAPIRouter(w, r, backendInstances, appCfg)
 	})
 
-
 	apiServer := &http.Server{
-		Addr:    ":" + appCfg.APIPort,
-		Handler: httpMux, // Use the new mux
-		ReadTimeout: 15 * time.Second,
-		WriteTimeout: 30 * time.Second, // Increased for potentially long streaming like staggered rotate
-		IdleTimeout: 60 * time.Second,
+		Addr:         ":" + appCfg.APIPort,
+		Handler:      httpMux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	go func() {
@@ -72,27 +82,23 @@ func main() {
 		}
 	}()
 
-	// Wait for termination signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 	log.Printf("Received signal: %s. Shutting down torgo application...", sig)
 
-	// Trigger context cancellation for goroutines like health monitor
 	cancel()
 
-	// Shutdown HTTP server gracefully
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second) // Increased shutdown timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 	if err := apiServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("API server shutdown error: %v", err)
 	}
 
-	// Add any other cleanup for Tor instances if necessary (e.g., closing control connections)
 	log.Println("Closing Tor instance control connections...")
 	for _, instance := range backendInstances {
 		instance.Mu.Lock()
-		instance.CloseControlConnUnlocked() // Ensure control connections are closed
+		instance.CloseControlConnUnlocked()
 		instance.Mu.Unlock()
 	}
 

@@ -69,11 +69,10 @@
     <script>
         const API_BASE_URL = `${window.location.origin}/api/v1`;
         let appDetails = null;
-        let instancesData = {};
+        let instancesData = {}; // { 1: {health: {}, stats: {}, config: {}}, ... }
         let refreshIntervalId = null;
-        const REFRESH_INTERVAL_MS = 20000; // Refresh every 20 seconds
+        const REFRESH_INTERVAL_MS = 20000;
 
-        // DOM Elements
         const commonSocksPortDisplay = document.getElementById('commonSocksPortDisplay');
         const commonSocksStatus = document.getElementById('commonSocksStatus');
         const commonDnsPortDisplay = document.getElementById('commonDnsPortDisplay');
@@ -83,19 +82,18 @@
         const lastUpdatedTimestamp = document.getElementById('lastUpdatedTimestamp');
         const refreshAllButton = document.getElementById('refreshAllButton');
         const rotateAllStaggeredButton = document.getElementById('rotateAllStaggeredButton');
-
         const statsModal = document.getElementById('statsModal');
         const modalTitle = document.getElementById('modalTitle');
         const modalStatsContent = document.getElementById('modalStatsContent');
         const closeModalButton = document.getElementById('closeModalButton');
 
-        async function fetchData(urlPath) {
+        async function fetchData(urlPath, options = {}) {
             try {
-                const response = await fetch(`${API_BASE_URL}${urlPath}`);
+                const response = await fetch(`${API_BASE_URL}${urlPath}`, options);
                 if (!response.ok) {
                     const errorText = await response.text();
                     console.warn(`Fetch error for ${urlPath}: ${response.status} - ${errorText}`);
-                    return { error: `HTTP ${response.status}: ${errorText}` };
+                    return { error: `HTTP ${response.status}: ${errorText.substring(0, 100)}` }; // Limit error length
                 }
                 return await response.json();
             } catch (error) {
@@ -104,17 +102,22 @@
             }
         }
         
-        async function postData(urlPath) {
+        async function postData(urlPath, body = null) {
              try {
-                const response = await fetch(`${API_BASE_URL}${urlPath}`, { method: 'POST' });
-                const responseText = await response.text(); // Get text first for potential non-JSON errors
+                const options = { method: 'POST' };
+                if (body) {
+                    options.headers = { 'Content-Type': 'application/json' };
+                    options.body = JSON.stringify(body);
+                }
+                const response = await fetch(`${API_BASE_URL}${urlPath}`, options);
+                const responseText = await response.text(); 
                 if (!response.ok) {
                     throw new Error(`HTTP error ${response.status}: ${responseText}`);
                 }
-                try { // Try to parse as JSON if successful
+                try { 
                     return JSON.parse(responseText);
-                } catch (e) { // If not JSON, return the text
-                    return responseText;
+                } catch (e) { 
+                    return responseText; // Return as text if not JSON (e.g. simple "OK" string)
                 }
             } catch (error) {
                 console.error(`POST error for ${urlPath}:`, error);
@@ -122,9 +125,11 @@
             }
         }
 
-
         function createInstanceCard(instanceId) {
-            const card = document.createElement('div');
+            let card = document.getElementById(`instance-${instanceId}-card`);
+            if (card) return; // Already exists
+
+            card = document.createElement('div');
             card.id = `instance-${instanceId}-card`;
             card.className = 'instance-card';
             card.innerHTML = `
@@ -133,6 +138,7 @@
                 <p><small>Control: <span id="instance-${instanceId}-control">N/A</span></small></p>
                 <p><small>SOCKS: <span id="instance-${instanceId}-socks">N/A</span></small></p>
                 <p><small>Bootstrap: <span id="instance-${instanceId}-bootstrap">N/A</span></small></p>
+                <p><small>Version: <span id="instance-${instanceId}-version">N/A</span></small></p>
                 <button id="rotate-btn-${instanceId}">New Circuit <span id="rotate-spinner-${instanceId}" class="loading-spinner" style="display:none;"></span></button>
                 <button id="stats-btn-${instanceId}">View Stats</button>
             `;
@@ -142,26 +148,35 @@
             document.getElementById(`stats-btn-${instanceId}`).addEventListener('click', () => showFullStats(instanceId));
         }
 
-        function updateInstanceCard(instanceId, data) {
-            const statusDot = document.getElementById(`instance-${instanceId}-status-dot`);
-            const statusText = document.getElementById(`instance-${instanceId}-status-text`);
-            const bootstrapText = document.getElementById(`instance-${instanceId}-bootstrap`);
-            const controlText = document.getElementById(`instance-${instanceId}-control`);
-            const socksText = document.getElementById(`instance-${instanceId}-socks`);
+        function updateInstanceCardUI(instanceId, data) {
+            const getElem = (suffix) => document.getElementById(`instance-${instanceId}-${suffix}`);
+            const statusDot = getElem('status-dot');
+            const statusText = getElem('status-text');
+            const bootstrapText = getElem('bootstrap');
+            const versionText = getElem('version');
+            const controlText = getElem('control');
+            const socksText = getElem('socks');
+
+            if (!statusDot) return; // Card might not be fully ready if called too early
 
             if (data.health && !data.health.error) {
                 statusDot.className = data.health.cached_is_healthy ? 'status-dot status-healthy' : 'status-dot status-unhealthy';
                 statusText.textContent = data.health.cached_is_healthy ? 'Healthy' : 'Unhealthy';
+                 if (data.health.last_health_check_at) {
+                    statusText.textContent += ` (as of ${new Date(data.health.last_health_check_at).toLocaleTimeString()})`;
+                }
             } else {
                 statusDot.className = 'status-dot status-unknown';
-                statusText.textContent = (data.health && data.health.error) ? `Error: ${data.health.error}` : 'No health data';
+                statusText.textContent = (data.health && data.health.error) ? `Error: ${data.health.error}` : 'Health N/A';
             }
 
             if (data.stats && !data.stats.error) {
                 const bootstrapSummary = data.stats.bootstrap_status ? data.stats.bootstrap_status.match(/SUMMARY="([^"]+)"/) : null;
                 bootstrapText.textContent = bootstrapSummary ? bootstrapSummary[1] : (data.stats.bootstrap_status || 'N/A');
+                versionText.textContent = data.stats.version || "N/A";
             } else {
-                 bootstrapText.textContent = (data.stats && data.stats.error) ? `Error: ${data.stats.error}` : 'No stats data';
+                 bootstrapText.textContent = (data.stats && data.stats.error) ? `Error: ${data.stats.error}` : 'Stats N/A';
+                 versionText.textContent = "N/A";
             }
             
             if (data.config && !data.config.error) {
@@ -186,14 +201,8 @@
             }
         }
 
-        closeModalButton.onclick = function() {
-            statsModal.style.display = "none";
-        }
-        window.onclick = function(event) {
-            if (event.target == statsModal) {
-                statsModal.style.display = "none";
-            }
-        }
+        closeModalButton.onclick = function() { statsModal.style.display = "none"; }
+        window.onclick = function(event) { if (event.target == statsModal) { statsModal.style.display = "none"; } }
 
         async function handleNewCircuitClick(instanceId) {
             const button = document.getElementById(`rotate-btn-${instanceId}`);
@@ -205,92 +214,121 @@
             if (result.error) {
                 alert(`Error requesting new circuit for instance ${instanceId}: ${result.error.message || result.error}`);
             } else {
-                // alert(`Instance ${instanceId}: New circuit requested.\nResponse: ${typeof result === 'string' ? result : JSON.stringify(result)}`);
                 document.getElementById(`instance-${instanceId}-status-text`).textContent = 'Rotation requested...';
             }
             button.disabled = false;
             spinner.style.display = 'none';
-            setTimeout(() => fetchAndRenderAllInstances(), 2000); // Refresh sooner after action
+            setTimeout(() => fetchAndRenderInstanceData(instanceId), 2000); 
         }
         
         rotateAllStaggeredButton.onclick = async function() {
             rotateAllStaggeredButton.disabled = true;
-            rotateAllStaggeredButton.textContent = "Rotating All...";
+            rotateAllStaggeredButton.textContent = "Rotating All (Streaming)...";
             
-            // For streaming, we'd need a different approach (e.g., EventSource or long polling)
-            // For a simple POST and wait:
-            const result = await postData(`/rotate-all-staggered`);
-             if (result.error) {
-                alert(`Error rotating all instances: ${result.error.message || result.error}`);
-            } else {
-                alert(`Staggered rotation initiated for all healthy instances. Check individual statuses or logs for progress.\nResponse snippet: ${typeof result === 'string' ? result.substring(0,100) : JSON.stringify(result).substring(0,100)}...`);
+            try {
+                const response = await fetch(`${API_BASE_URL}/rotate-all-staggered`, { method: 'POST' });
+                if (!response.ok) {
+                    throw new Error(`HTTP error ${response.status}`);
+                }
+                // For streaming, you'd typically read response.body with a ReadableStream
+                // For this basic UI, we'll just acknowledge and let user check logs/status later
+                alert(`Staggered rotation initiated. Monitor Web UI or server logs for progress.`);
+
+            } catch (error) {
+                alert(`Error initiating staggered rotation: ${error.message}`);
+                 console.error("Staggered rotation error:", error);
             }
 
             rotateAllStaggeredButton.disabled = false;
             rotateAllStaggeredButton.textContent = "Rotate All Healthy Staggered";
-            setTimeout(() => fetchAndRenderAllInstances(), 5000); // Refresh after a bit
+            setTimeout(() => fetchAndRenderAllInstances(), 5000); 
         }
-
 
         function updateCommonProxyStatusDisplay() {
-            let healthyCount = 0;
-            let totalConfiguredInstances = (appDetails && appDetails.num_instances) ? appDetails.num_instances : 0;
-            
-            Object.values(instancesData).forEach(data => {
-                if (data && data.health && !data.health.error && data.health.cached_is_healthy) {
-                    healthyCount++;
-                }
-            });
+            let healthyBackendCount = 0;
+            const configuredInstances = (appDetails && appDetails.num_instances) ? parseInt(appDetails.num_instances, 10) : 0;
 
-            if (totalConfiguredInstances === 0) {
-                 commonSocksStatus.innerHTML = 'No instances configured.';
-                 commonDnsStatus.innerHTML = 'No instances configured.';
-            } else if (Object.keys(instancesData).length < totalConfiguredInstances && Object.keys(instancesData).length === 0) {
-                 commonSocksStatus.innerHTML = `Awaiting first health check for ${totalConfiguredInstances} instances...`;
-                 commonDnsStatus.innerHTML = `Awaiting first health check for ${totalConfiguredInstances} instances...`;
-            } else if (healthyCount > 0) {
-                commonSocksStatus.innerHTML = `<span class="status-dot status-healthy"></span>Operational (${healthyCount}/${totalConfiguredInstances} healthy)`;
-                commonDnsStatus.innerHTML = `<span class="status-dot status-healthy"></span>Operational (${healthyCount}/${totalConfiguredInstances} healthy)`;
-            } else {
-                commonSocksStatus.innerHTML = `<span class="status-dot status-unhealthy"></span>Offline (0/${totalConfiguredInstances} healthy)`;
-                commonDnsStatus.innerHTML = `<span class="status-dot status-unhealthy"></span>Offline (0/${totalConfiguredInstances} healthy)`;
+            if (configuredInstances > 0) {
+                for (let i = 1; i <= configuredInstances; i++) {
+                    if (instancesData[i] && instancesData[i].health && !instancesData[i].health.error && instancesData[i].health.cached_is_healthy === true) {
+                        healthyBackendCount++;
+                    }
+                }
+            }
+            
+            commonSocksPortDisplay.textContent = (appDetails && appDetails.common_socks_port) ? appDetails.common_socks_port : 'N/A';
+            commonDnsPortDisplay.textContent = (appDetails && appDetails.common_dns_port) ? appDetails.common_dns_port : 'N/A';
+
+            if (!appDetails) { // appDetails not yet fetched
+                commonSocksStatus.textContent = 'Loading app details...';
+                commonDnsStatus.textContent = 'Loading app details...';
+            } else if (configuredInstances === 0) {
+                commonSocksStatus.innerHTML = 'No instances configured.';
+                commonDnsStatus.innerHTML = 'No instances configured.';
+            } else if (healthyBackendCount > 0) {
+                commonSocksStatus.innerHTML = `<span class="status-dot status-healthy"></span>Operational (${healthyBackendCount}/${configuredInstances} healthy)`;
+                commonDnsStatus.innerHTML = `<span class="status-dot status-healthy"></span>Operational (${healthyBackendCount}/${configuredInstances} healthy)`;
+            } else { 
+                commonSocksStatus.innerHTML = `<span class="status-dot status-unhealthy"></span>Offline (0/${configuredInstances} healthy)`;
+                commonDnsStatus.innerHTML = `<span class="status-dot status-unhealthy"></span>Offline (0/${configuredInstances} healthy)`;
             }
         }
+        
+        async function fetchAndRenderInstanceData(instanceId) {
+            if (!document.getElementById(`instance-${instanceId}-card`)) {
+                createInstanceCard(instanceId);
+            }
+            try {
+                const [health, stats, config] = await Promise.all([
+                    fetchData(`/tor${instanceId}/health`),
+                    fetchData(`/tor${instanceId}/stats`),
+                    fetchData(`/tor${instanceId}/config`)
+                ]);
+                instancesData[instanceId] = { health, stats, config };
+                updateInstanceCardUI(instanceId, instancesData[instanceId]);
+            } catch (error) {
+                 console.error(`Error fetching data bundle for instance ${instanceId}:`, error);
+                 updateInstanceCardUI(instanceId, { 
+                     health: {error: 'Fetch bundle failed'}, 
+                     stats: {error: 'Fetch bundle failed'}, 
+                     config: {error: 'Fetch bundle failed'} 
+                 });
+            }
+        }
+
 
         async function fetchAndRenderAllInstances() {
             if (!appDetails) {
-                const num = await fetchAppDetails();
-                if (num === 0 && !appDetails) { // Still no appDetails after fetch (e.g. API error)
-                    instancesContainer.innerHTML = '<p>Error fetching application details. Cannot load instances.</p>';
-                    updateCommonProxyStatusDisplay();
+                const num = await fetchData("/app-details").then(d => d.num_instances || 0);
+                if (num === 0 && !appDetails) { 
+                    if (!appDetails) appDetails = { num_instances: 0 }; // Ensure appDetails is not null
+                    instancesContainer.innerHTML = '<p>Error fetching application details or no instances configured.</p>';
+                    updateCommonProxyStatusDisplay(); // Update with current appDetails
                     return;
                 }
+                // If fetchAppDetails was successful, appDetails global var is set
             }
-            if (!appDetails || appDetails.num_instances === 0) {
+             if (!appDetails) { // Still no appDetails, something went wrong
+                console.error("App details could not be fetched for rendering instances.");
+                instancesContainer.innerHTML = '<p>Critical error: Could not fetch application details.</p>';
+                updateCommonProxyStatusDisplay();
+                return;
+            }
+
+
+            const numInstances = appDetails.num_instances;
+            instanceCountDisplay.textContent = numInstances; // Update count here
+            if (numInstances === 0) {
                  instancesContainer.innerHTML = '<p>No Tor instances configured.</p>';
                  updateCommonProxyStatusDisplay();
                  return;
             }
-
-            const numInstances = appDetails.num_instances;
+            
             const instancePromises = [];
-            instancesContainer.innerHTML = ''; // Clear old cards before creating new ones
+            // instancesContainer.innerHTML = ''; // Clear only if we are sure we are re-rendering all
 
             for (let i = 1; i <= numInstances; i++) {
-                createInstanceCard(i); // Create card structure first
-                instancePromises.push(
-                    Promise.all([
-                        fetchData(`/tor${i}/health`), 
-                        fetchData(`/tor${i}/stats`),
-                        fetchData(`/tor${i}/config`)
-                    ]).then(([health, stats, config]) => {
-                        instancesData[i] = { health, stats, config };
-                        updateInstanceCard(i, instancesData[i]);
-                    }).catch(error => {
-                        console.error(`Error fetching data bundle for instance ${i}:`, error);
-                        updateInstanceCard(i, { health: {error: 'Fetch failed'}, stats: {error: 'Fetch failed'}, config: {error: 'Fetch failed'} });
-                    })
-                );
+                instancePromises.push(fetchAndRenderInstanceData(i));
             }
             
             try {
@@ -304,10 +342,26 @@
         
         refreshAllButton.addEventListener('click', () => {
             lastUpdatedTimestamp.textContent = 'Refreshing...';
+            // Clear existing instance data to force full re-fetch and re-render
+            // instancesData = {}; 
+            // instancesContainer.innerHTML = ''; // Optionally clear cards for visual refresh
             fetchAndRenderAllInstances();
         });
 
         async function initializeUI() {
+            appDetails = await fetchData("/app-details"); // Fetch app details first
+            if (appDetails.error) {
+                console.error("Initialization failed: could not fetch app details.", appDetails.error);
+                commonSocksStatus.textContent = `Error: ${appDetails.error}`;
+                commonDnsStatus.textContent = `Error: ${appDetails.error}`;
+                instanceCountDisplay.textContent = 'Error';
+                return;
+            }
+            commonSocksPortDisplay.textContent = appDetails.common_socks_port || 'N/A';
+            commonDnsPortDisplay.textContent = appDetails.common_dns_port || 'N/A';
+            instanceCountDisplay.textContent = appDetails.num_instances || 0;
+
+
             await fetchAndRenderAllInstances(); 
             if (refreshIntervalId) clearInterval(refreshIntervalId);
             refreshIntervalId = setInterval(fetchAndRenderAllInstances, REFRESH_INTERVAL_MS);
