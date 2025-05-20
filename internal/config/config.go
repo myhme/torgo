@@ -37,9 +37,7 @@ type AppConfig struct {
 	IPCheckURL          string
 	SocksTimeout        time.Duration
 
-	// For round-robin load balancing (shared state)
-	LBMutex        sync.Mutex
-	LBCurrentIndex int32
+	// LBMutex and LBCurrentIndex are removed as they are not needed for random selection.
 
 	// For staggered rotation (shared state)
 	IsGlobalRotationActive int32 // 0 for false, 1 for true (atomic)
@@ -53,7 +51,7 @@ func LoadConfig() *AppConfig {
 	once.Do(func() {
 		log.Println("Loading application configuration...")
 		cfg := &AppConfig{
-			LBCurrentIndex: -1, 
+			// LBCurrentIndex: -1, // Removed
 		}
 
 		nInstancesStr := os.Getenv("TOR_INSTANCES_CONFIGURED")

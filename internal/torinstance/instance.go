@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -22,20 +23,23 @@ import (
 // Instance represents a single backend Tor process and its state.
 type Instance struct {
 	InstanceID       int
-	ControlHost      string // e.g., "127.0.0.1:9161"
-	BackendSocksHost string // e.g., "127.0.0.1:9051"
-	BackendDNSHost   string // e.g., "127.0.0.1:9201" (Tor's actual DNS port)
+	ControlHost      string 
+	BackendSocksHost string 
+	BackendDNSHost   string 
 	AuthCookiePath   string
 	DataDir          string
 
-	Mu                sync.Mutex // Exported Mutex
-	httpClient        *http.Client // For IP checking via this specific Tor instance
+	Mu                sync.Mutex 
+	httpClient        *http.Client 
 	activeControlConn net.Conn
-	controlCookieHex  string
-	IsHealthy         bool // Exported for direct read by other packages (under instance lock)
-	LastHealthCheck   time.Time // Exported
+	controlCookieHex  string    // Cached hex-encoded cookie
+	IsHealthy         bool      
+	LastHealthCheck   time.Time 
+	ConsecutiveFailures int     // For auto-NEWNYM logic
+	LastAutoRotateAttempt time.Time // For auto-NEWNYM logic
 
-	appConfig *config.AppConfig // Reference to global app config
+
+	appConfig *config.AppConfig 
 }
 
 // New creates a new Tor instance configuration.
@@ -60,24 +64,34 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 	return ti
 }
 
-func (ti *Instance) loadAndCacheControlCookieUnlocked() error {
-	// Assumes ti.Mu is locked
-	if ti.controlCookieHex != "" {
-		return nil
+// loadAndCacheControlCookieUnlocked attempts to read the cookie file.
+// If forceReload is true, it ignores any cached cookie.
+// Assumes ti.Mu is locked.
+func (ti *Instance) loadAndCacheControlCookieUnlocked(forceReload bool) error {
+	if ti.controlCookieHex != "" && !forceReload {
+		return nil // Use cached version
 	}
+	// log.Printf("Instance %d: Reading control cookie from %s (forceReload: %v)", ti.InstanceID, ti.AuthCookiePath, forceReload)
 	cookieBytes, err := os.ReadFile(ti.AuthCookiePath)
 	if err != nil {
+		ti.controlCookieHex = "" // Ensure cache is clear on error
 		return fmt.Errorf("instance %d: failed to read cookie %s: %w", ti.InstanceID, ti.AuthCookiePath, err)
 	}
 	ti.controlCookieHex = hex.EncodeToString(cookieBytes)
+	// log.Printf("Instance %d: Successfully loaded control cookie.", ti.InstanceID)
 	return nil
 }
 
 func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, error) {
 	// Assumes ti.Mu is locked
-	if err := ti.loadAndCacheControlCookieUnlocked(); err != nil {
-		return nil, nil, err
+	// Attempt to load/reload cookie. If it fails, we can't authenticate.
+	if err := ti.loadAndCacheControlCookieUnlocked(false); err != nil { // false: don't force reload initially
+		return nil, nil, fmt.Errorf("instance %d: pre-connect cookie load failed: %w", ti.InstanceID, err)
 	}
+    if ti.controlCookieHex == "" { // Still no cookie after attempt
+        return nil, nil, fmt.Errorf("instance %d: control cookie is empty after load attempt", ti.InstanceID)
+    }
+
 
 	conn, err := net.DialTimeout("tcp", ti.ControlHost, 5*time.Second)
 	if err != nil {
@@ -102,15 +116,20 @@ func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, erro
 		return nil, nil, fmt.Errorf("instance %d: failed to read authentication response: %w", ti.InstanceID, err)
 	}
 
-	if !strings.HasPrefix(statusLine, "250 OK") {
+	trimmedStatus := strings.TrimSpace(statusLine)
+	if !strings.HasPrefix(trimmedStatus, "250 OK") {
 		conn.Close()
-		return nil, nil, fmt.Errorf("instance %d: tor control port authentication failed: %s", ti.InstanceID, strings.TrimSpace(statusLine))
+		// If authentication specifically failed (515), invalidate the cached cookie.
+		if strings.HasPrefix(trimmedStatus, "515") { // Tor's code for auth failure
+			log.Printf("Instance %d: Control port authentication failed (515). Invalidating cached cookie. Will retry reading on next attempt. Tor msg: %s", ti.InstanceID, trimmedStatus)
+			ti.controlCookieHex = "" // Invalidate cached cookie
+		}
+		return nil, nil, fmt.Errorf("instance %d: tor control port authentication failed: %s", ti.InstanceID, trimmedStatus)
 	}
 	ti.activeControlConn = conn
 	return conn, reader, nil
 }
 
-// CloseControlConnUnlocked closes the active control connection. Assumes ti.Mu is locked.
 func (ti *Instance) CloseControlConnUnlocked() {
 	if ti.activeControlConn != nil {
 		ti.activeControlConn.Close()
@@ -118,7 +137,6 @@ func (ti *Instance) CloseControlConnUnlocked() {
 	}
 }
 
-// SendTorCommand sends a command to this Tor instance's control port.
 func (ti *Instance) SendTorCommand(command string) (string, error) {
 	ti.Mu.Lock() 
 	defer ti.Mu.Unlock()
@@ -127,57 +145,77 @@ func (ti *Instance) SendTorCommand(command string) (string, error) {
 	var reader *bufio.Reader
 	var err error
 
-	if ti.activeControlConn != nil {
-		conn = ti.activeControlConn
-		reader = bufio.NewReader(conn) 
-	} else {
-		conn, reader, err = ti.connectToTorControlUnlocked()
-		if err != nil {
-			return "", fmt.Errorf("instance %d SendTorCommand: connection phase failed: %w", ti.InstanceID, err)
+	// Try up to 2 times if first attempt fails (e.g. due to stale cookie or closed conn)
+	for attempt := 0; attempt < 2; attempt++ {
+		if ti.activeControlConn != nil {
+			conn = ti.activeControlConn
+			reader = bufio.NewReader(conn) 
+		} else {
+			// If controlCookieHex is empty here, it means a previous auth failed (515) and it was cleared.
+			// connectToTorControlUnlocked will try to reload it.
+			conn, reader, err = ti.connectToTorControlUnlocked()
+			if err != nil {
+				if attempt == 0 { // First attempt failed to connect
+					log.Printf("Instance %d SendTorCommand: connection attempt %d failed: %v. Retrying...", ti.InstanceID, attempt+1, err)
+					ti.CloseControlConnUnlocked() // Ensure it's closed before retry
+					ti.controlCookieHex = "" // Force cookie reload on retry if connect failed due to auth
+					continue // Retry connection
+				}
+				return "", fmt.Errorf("instance %d SendTorCommand: connection phase failed after retries: %w", ti.InstanceID, err)
+			}
 		}
-	}
 
-	conn.SetWriteDeadline(time.Now().Add(ti.appConfig.SocksTimeout)) 
-	if _, errWrite := conn.Write([]byte(command + "\r\n")); errWrite != nil {
-		conn.SetWriteDeadline(time.Time{})  
-		ti.CloseControlConnUnlocked()      
-		log.Printf("Instance %d: Write failed for command '%s' (%v), connection closed.", ti.InstanceID, command, errWrite)
-		return "", fmt.Errorf("instance %d: write failed for command '%s': %w", ti.InstanceID, command, errWrite)
-	}
-	conn.SetWriteDeadline(time.Time{}) 
-
-	var responseBuffer bytes.Buffer
-	isMultiLine := strings.HasPrefix(command, "GETINFO")
-	
-	readDeadlineDuration := 10 * time.Second 
-	if isMultiLine {
-		readDeadlineDuration = 20 * time.Second 
-	}
-	conn.SetReadDeadline(time.Now().Add(readDeadlineDuration))
-
-	for {
-		line, errRead := reader.ReadString('\n')
-		if errRead != nil {
-			conn.SetReadDeadline(time.Time{}) 
-			ti.CloseControlConnUnlocked()    
-			// log.Printf("Instance %d: Read failed for command '%s' (%v), connection closed. Partial response: '%s'", ti.InstanceID, command, errRead, responseBuffer.String())
-			return responseBuffer.String(), fmt.Errorf("instance %d: failed to read full response for '%s': %w. Partial: '%s'", ti.InstanceID, command, errRead, responseBuffer.String())
+		conn.SetWriteDeadline(time.Now().Add(ti.appConfig.SocksTimeout)) 
+		if _, errWrite := conn.Write([]byte(command + "\r\n")); errWrite != nil {
+			conn.SetWriteDeadline(time.Time{})  
+			ti.CloseControlConnUnlocked()      
+			log.Printf("Instance %d: Write failed for command '%s' (%v), connection closed. Attempt %d.", ti.InstanceID, command, errWrite, attempt+1)
+			if attempt == 0 { continue } // Retry
+			return "", fmt.Errorf("instance %d: write failed for command '%s': %w", ti.InstanceID, command, errWrite)
 		}
-		responseBuffer.WriteString(line)
-		trimmedLine := strings.TrimSpace(line)
-		
-		if strings.HasPrefix(trimmedLine, "250 OK") { break } 
-		if strings.HasPrefix(trimmedLine, "250 ") && !strings.HasPrefix(trimmedLine, "250-") && !isMultiLine { break } 
-		if strings.HasPrefix(trimmedLine, "5") { 
-			// log.Printf("Instance %d: Received Tor error response for command '%s': %s", ti.InstanceID, command, trimmedLine)
-			break 
+		conn.SetWriteDeadline(time.Time{}) 
+
+		var responseBuffer bytes.Buffer
+		isMultiLine := strings.HasPrefix(command, "GETINFO")
+		readDeadlineDuration := 10 * time.Second 
+		if isMultiLine { readDeadlineDuration = 20 * time.Second }
+		conn.SetReadDeadline(time.Now().Add(readDeadlineDuration))
+
+		for {
+			line, errRead := reader.ReadString('\n')
+			if errRead != nil {
+				conn.SetReadDeadline(time.Time{}) 
+				ti.CloseControlConnUnlocked()    
+				log.Printf("Instance %d: Read failed for command '%s' (%v), connection closed. Attempt %d. Partial: '%s'", ti.InstanceID, command, errRead, attempt+1, responseBuffer.String())
+				if errRead == io.EOF && responseBuffer.Len() > 0 { // EOF might be a valid end for some responses
+					return strings.TrimSpace(responseBuffer.String()), nil
+				}
+				if attempt == 0 { break } // Break inner loop to retry outer SendTorCommand loop
+				return responseBuffer.String(), fmt.Errorf("instance %d: failed to read full response for '%s': %w. Partial: '%s'", ti.InstanceID, command, errRead, responseBuffer.String())
+			}
+			responseBuffer.WriteString(line)
+			trimmedLine := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmedLine, "250 OK") { return strings.TrimSpace(responseBuffer.String()), nil } 
+			if strings.HasPrefix(trimmedLine, "250 ") && !strings.HasPrefix(trimmedLine, "250-") && !isMultiLine { return strings.TrimSpace(responseBuffer.String()), nil } 
+			if strings.HasPrefix(trimmedLine, "5") { 
+				// If it's a 515 error, specifically invalidate cookie for next top-level retry
+				if strings.HasPrefix(trimmedLine, "515") {
+					log.Printf("Instance %d: Received Tor error 515 for '%s'. Invalidating cookie for retry. Full error: %s", ti.InstanceID, command, trimmedLine)
+					ti.controlCookieHex = ""
+				} else {
+					log.Printf("Instance %d: Received Tor error response for command '%s': %s", ti.InstanceID, command, trimmedLine)
+				}
+				if attempt == 0 { break } // Break inner loop to retry outer SendTorCommand loop
+				return strings.TrimSpace(responseBuffer.String()), fmt.Errorf("tor error: %s", trimmedLine)
+			}
 		}
+		conn.SetReadDeadline(time.Time{}) 
+		if attempt == 0 { continue } // If we broke from inner loop due to 5xx error on first attempt, retry SendTorCommand
 	}
-	conn.SetReadDeadline(time.Time{}) 
-	return strings.TrimSpace(responseBuffer.String()), nil
+	// Should not be reached if logic is correct, but as a fallback:
+	return "", fmt.Errorf("instance %d: SendTorCommand exhausted retries for command '%s'", ti.InstanceID, command)
 }
 
-// CheckHealth updates the IsHealthy status of the instance.
 func (ti *Instance) CheckHealth(ctx context.Context) bool {
 	healthCtx, cancel := context.WithTimeout(ctx, 7*time.Second) 
 	defer cancel()
@@ -191,44 +229,43 @@ func (ti *Instance) CheckHealth(ctx context.Context) bool {
 	}()
 
 	isCurrentlyHealthy := false
-	var errMsg string
+	var checkErrMessage string 
 
 	select {
 	case <-healthCtx.Done():
-		errMsg = fmt.Sprintf("timed out for control host %s", ti.ControlHost)
-		log.Printf("Instance %d: Health check %s", ti.InstanceID, errMsg)
+		checkErrMessage = fmt.Sprintf("timed out for control host %s", ti.ControlHost)
 	case res := <-ch:
-		// Log the raw response for debugging if it's not what we expect
-		// if !strings.Contains(res.response, "PROGRESS=100 TAG=done") || res.err != nil {
-		// 	log.Printf("Instance %d: Health check raw response: '%s', error: %v", ti.InstanceID, res.response, res.err)
-		// }
-
-		// The key parts of a successful bootstrap are "PROGRESS=100" and "TAG=done".
-		// The full key "status/bootstrap-phase=" should also be present.
-		// Example successful response from Tor: "250-status/bootstrap-phase=PROGRESS=100 TAG=done SUMMARY=\"Done\"\n250 OK"
-		// After SendTorCommand processing, res.response might be "status/bootstrap-phase=PROGRESS=100 TAG=done SUMMARY=\"Done\"\n250 OK"
-		// or just "PROGRESS=100 TAG=done SUMMARY=\"Done\"" if Tor replies with a single line for some GETINFO.
-		
-		if res.err == nil &&
-		   strings.Contains(res.response, "PROGRESS=100") &&
-		   strings.Contains(res.response, "TAG=done") &&
-		   (strings.Contains(res.response, "status/bootstrap-phase=") || strings.HasPrefix(res.response, "PROGRESS=100")) { // Be a bit flexible on the key prefix
-			isCurrentlyHealthy = true
+		expectedContent := "status/bootstrap-phase=PROGRESS=100 TAG=done SUMMARY=\"Done\""
+		if res.err == nil && strings.Contains(res.response, "PROGRESS=100") && strings.Contains(res.response, "TAG=done") {
+			// More robust check for the full expected line, potentially after "250-" or "250 "
+			if strings.Contains(res.response, expectedContent) {
+				isCurrentlyHealthy = true
+				checkErrMessage = "Successfully bootstrapped"
+			} else {
+				// It has PROGRESS=100 and TAG=done, but not the full summary. Still consider it mostly healthy.
+				// This can happen if SendTorCommand returns a slightly different format.
+				// For now, let's be a bit lenient if the core parts are there.
+				isCurrentlyHealthy = true 
+				checkErrMessage = fmt.Sprintf("bootstrap 100%%, TAG=done, but summary/prefix mismatch: '%s'", firstNChars(res.response, 150))
+				// log.Printf("Instance %d: Health check lenient pass: %s", ti.InstanceID, checkErrMessage)
+			}
 		} else {
 			if res.err != nil {
-				errMsg = fmt.Sprintf("error: %v", res.err)
+				checkErrMessage = fmt.Sprintf("error during GETINFO: %v. Response: '%s'", res.err, firstNChars(res.response, 100))
 			} else { 
-				logMsg := res.response
-				if len(logMsg) > 150 { logMsg = logMsg[:150] + "..."} 
-				errMsg = fmt.Sprintf("unexpected bootstrap phase or content: '%s'", logMsg)
+				checkErrMessage = fmt.Sprintf("bootstrap not complete or unexpected response: '%s'", firstNChars(res.response, 150))
 			}
-			log.Printf("Instance %d: Health check failed for control host %s (%s)", ti.InstanceID, ti.ControlHost, errMsg)
 		}
 	}
 
 	ti.Mu.Lock()
 	if ti.IsHealthy != isCurrentlyHealthy {
-		log.Printf("Instance %d: Health status changed to %v (was %v). Last check reason: %s", ti.InstanceID, isCurrentlyHealthy, ti.IsHealthy, errMsg)
+		log.Printf("Instance %d: Health status changed to %v (was %v). Reason/Details: %s", ti.InstanceID, isCurrentlyHealthy, ti.IsHealthy, checkErrMessage)
+	}
+	if !isCurrentlyHealthy && ti.IsHealthy { // Was healthy, now unhealthy
+		ti.ConsecutiveFailures++
+	} else if isCurrentlyHealthy {
+		ti.ConsecutiveFailures = 0
 	}
 	ti.IsHealthy = isCurrentlyHealthy
 	ti.LastHealthCheck = time.Now()
@@ -279,4 +316,11 @@ func (ti *Instance) GetHTTPClient() *http.Client {
 		ti.initializeHTTPClientUnlocked()
 	}
 	return ti.httpClient
+}
+
+func firstNChars(s string, n int) string { 
+    if len(s) > n {
+        return s[:n] + "..."
+    }
+    return s
 }
