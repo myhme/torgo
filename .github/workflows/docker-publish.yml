@@ -1,0 +1,81 @@
+name: Docker Publish for Torgo
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'Docker tags (e.g., latest, beta, specific version). Defaults to branch name or "latest" for main.'
+        required: false
+        default: '' # Will be derived if empty
+
+  # Triggers the workflow on push events for the main and beta branches
+  push:
+    branches:
+      - main
+      - beta
+    # Optionally, trigger on tags as well if you use git tags for releases
+    # tags:
+    // - 'v*.*.*'
+
+jobs:
+  build-and-push-docker-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # To checkout the repository
+      packages: write # To push packages to GitHub Container Registry (GHCR)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }} # or your GitHub username
+          password: ${{ secrets.GITHUB_TOKEN }}    # GITHUB_TOKEN has write access to packages for the repo
+
+      - name: Determine Docker metadata (tags and labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/torgo # Replace 'torgo' if your image name is different
+          # For push events
+          tags: |
+            type=ref,event=branch # main -> main, beta -> beta
+            type=ref,event=pr
+            type=semver,pattern={{version}} # For git tags like v1.2.3
+            type=sha # Add git SHA as a tag for traceability
+            # For workflow_dispatch, allow manual tag or derive
+            type=raw,value=${{ github.event.inputs.tags }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tags != '' }}
+            # Default tag for main branch if no manual tag is provided for workflow_dispatch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: . # Build context is the root of the repository
+          file: ./Dockerfile # Path to your Dockerfile
+          push: true # Actually push the image
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Optional: Pass build arguments like ADGUARD_VERSION if needed
+          # build-args: |
+          #   ADGUARD_VERSION=v0.107.53
+
+    outputs:
+      image_tags: ${{ steps.meta.outputs.tags }}
+
+  # Optional: Notify on success or failure
+  # notify:
+  // needs: build-and-push-docker-image
+  # if: always() # Run even if the build job fails
+  # runs-on: ubuntu-latest
+  # steps:
+  // - name: Send notification
+  # run: echo "Docker build and push status: ${{ needs.build-and-push-docker-image.result }}. Tags: ${{ needs.build-and-push-docker-image.outputs.image_tags }}"
+  # Add your preferred notification method here (e.g., Slack, email)
