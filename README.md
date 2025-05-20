@@ -1,6 +1,6 @@
 # torgo: Multi-Instance Tor Controller & Load Balancing Proxy
 
-**torgo** is a Go application designed to manage multiple backend Tor instances, providing a unified SOCKS5 and DNS proxy interface with round-robin load balancing. It also exposes an HTTP API for fine-grained control over individual Tor instances, including circuit rotation, health checks, and statistics.
+**torgo** is a Go application designed to manage multiple backend Tor instances, providing a unified SOCKS5 and DNS proxy interface with round-robin load balancing. It also exposes an HTTP API for fine-grained control over individual Tor instances, including circuit rotation, health checks, and statistics, along with a basic Web UI for monitoring.
 
 ## Features
 
@@ -14,9 +14,11 @@
     * Retrieve statistics from an instance.
     * Get the current external IP address used by an instance.
     * Dynamically configure an instance's backend SOCKS, DNS, and Control ports (use with caution for ControlPort).
-* **Global Staggered Rotation**: Rotate circuits for all healthy Tor instances one by one with a configurable delay, preventing simultaneous IP changes.
+* **Global Staggered Rotation API**: Rotate circuits for all healthy Tor instances one by one with a configurable delay.
 * **Health Monitoring**: Periodically checks the health of each backend Tor instance and excludes unhealthy ones from the load balancing pool.
+* **Basic Web UI**: A simple web interface served at `/webui` to monitor instance status and trigger new circuits.
 * **Dockerized**: Easy to build and deploy using Docker and Docker Compose.
+* **Docker Health Check**: Integrated health check for the Docker container via the common SOCKS5 proxy.
 * **Configurable**: Key parameters like the number of Tor instances, base ports, common proxy ports, and rotation delays are configurable via environment variables.
 
 ## Project Structure
@@ -26,15 +28,18 @@ torgo/
 ├── cmd/torgo/              # Main application package
 │   └── main.go
 ├── internal/               # Internal packages
-│   ├── api/                # HTTP API handlers
+│   ├── api/                # HTTP API handlers & WebUI
+│   │   ├── handlers.go
+│   │   └── webui.html
 │   ├── config/             # Application configuration
 │   ├── health/             # Health monitoring
 │   ├── lb/                 # Load balancing logic
 │   ├── proxy/              # SOCKS5 and DNS proxy servers
 │   └── torinstance/        # Tor instance management
 ├── Dockerfile              # Builds the application
-├── entrypoint.sh           # Starts Tor instances and the Go app
 ├── docker-compose.yml      # For easy deployment
+├── docker-healthcheck.sh   # Script for Docker health checks
+├── entrypoint.sh           # Starts Tor instances and the Go app
 ├── go.mod                  # Go module definition
 ├── go.sum
 └── torrc.template          # Template for Tor configuration
@@ -68,7 +73,7 @@ The application is configured via environment variables, primarily set in `docke
 **Key Environment Variables (defaults are shown if not set in `.env` or `docker-compose.yml`):**
 
 * `TOR_INSTANCES`: Number of backend Tor instances to run (default specified in `docker-compose.yml`, e.g., `3`).
-* `API_PORT`: Port for the Go management API (default: `8080`).
+* `API_PORT`: Port for the Go management API and WebUI (default: `8080`).
 * `COMMON_SOCKS_PROXY_PORT`: Port for the common SOCKS5 proxy (default: `9000`).
 * `COMMON_DNS_PROXY_PORT`: Port for the common DNS proxy (default: `5300`).
 * `ROTATION_STAGGER_DELAY_SECONDS`: Delay (in seconds) between rotating circuits in the "rotate-all-staggered" command (default: `10` or `15` as per `docker-compose.yml`).
@@ -83,63 +88,70 @@ The application is configured via environment variables, primarily set in `docke
 
 * **SOCKS5 Proxy**: Configure your applications to use `127.0.0.1:<COMMON_SOCKS_PROXY_PORT>` (e.g., `127.0.0.1:9000` if using default).
 * **DNS Proxy**: Configure your system or applications to use `127.0.0.1:<COMMON_DNS_PROXY_PORT>` (e.g., `127.0.0.1:5300` if using default) for DNS resolution.
+* **Web UI**: Access the web interface at `http://localhost:<API_PORT>/webui` (e.g., `http://localhost:8080/webui`).
 
 ## API Endpoints
 
-The management API listens on `http://localhost:<API_PORT>` (e.g., `http://localhost:8080` if using default).
+The management API listens on `http://localhost:<API_PORT>`.
 
 ### Global Endpoints
 
-* **`POST` or `GET` `/api/v1/rotate-all-staggered`**:
-    Rotates the Tor circuits for all currently healthy backend instances in a staggered manner, with a delay between each rotation. Streams progress to the client.
+* **`GET` or `POST` `/api/v1/rotate-all-staggered`**:
+    Rotates the Tor circuits for all currently healthy backend instances in a staggered manner. Streams progress.
+* **`GET` `/api/v1/app-details`**:
+    Provides basic application configuration details (number of instances, common ports).
 
 ### Per-Instance Endpoints
 
-Replace `<id>` with the Tor instance number (e.g., `tor1`, `tor2`, ..., `torN` based on `TOR_INSTANCES`).
+Replace `<id>` with the Tor instance number (e.g., `tor1`, `tor2`, ..., `torN`).
 
 * **`POST` or `GET` `/api/v1/tor<id>/rotate`**:
     Signals the specified Tor instance to get a new circuit (NEWNYM).
     *Example*: `curl -X POST http://localhost:8080/api/v1/tor1/rotate`
 
 * **`GET` `/api/v1/tor<id>/health`**:
-    Checks the health of the specified Tor instance. Returns live check result and cached status.
+    Checks the health of the specified Tor instance.
     *Example*: `curl http://localhost:8080/api/v1/tor1/health`
 
 * **`GET` `/api/v1/tor<id>/stats`**:
-    Retrieves various statistics from the specified Tor instance (e.g., version, bootstrap status, traffic).
+    Retrieves statistics from the specified Tor instance.
     *Example*: `curl http://localhost:8080/api/v1/tor1/stats`
 
 * **`GET` `/api/v1/tor<id>/ip`**:
-    Gets the current external IP address as seen by the specified Tor instance using its dedicated SOCKS proxy and the configured `IP_CHECK_URL`.
+    Gets the current external IP address as seen by the specified Tor instance.
     *Example*: `curl http://localhost:8080/api/v1/tor1/ip`
 
 * **`GET` `/api/v1/tor<id>/config`**:
-    Retrieves the current backend configuration details for the specified Tor instance as tracked by the API (e.g., its control host, backend SOCKS/DNS ports, health status).
+    Retrieves the backend configuration details for the specified Tor instance.
     *Example*: `curl http://localhost:8080/api/v1/tor1/config`
 
 * **`POST` `/api/v1/tor<id>/config/socksport`**:
-    Dynamically changes the backend SOCKS port for the specified Tor instance. The Go application's internal HTTP client for this instance will also be updated.
+    Dynamically changes the backend SOCKS port for the specified Tor instance.
     *JSON Body*: `{"address": "127.0.0.1", "port": 9055}`
-    *Example*: `curl -X POST -H "Content-Type: application/json" -d '{"port": 9055}' http://localhost:8080/api/v1/tor1/config/socksport`
 
 * **`POST` `/api/v1/tor<id>/config/dnsport`**:
     Dynamically changes the backend DNS port for the specified Tor instance. Port `0` disables it.
-    *JSON Body*: `{"address": "127.0.0.1", "port": 9255}` or `{"port": 0}`
-    *Example*: `curl -X POST -H "Content-Type: application/json" -d '{"port": 9255}' http://localhost:8080/api/v1/tor1/config/dnsport`
+    *JSON Body*: `{"address": "127.0.0.1", "port": 9255}`
 
 * **`POST` `/api/v1/tor<id>/config/controlport`**:
-    **HIGHLY RISKY**. Dynamically changes the backend Control port for the specified Tor instance. If the API fails to reconnect to the new port, control over that instance may be lost until a container restart.
+    **HIGHLY RISKY**. Dynamically changes the backend Control port.
     *JSON Body*: `{"address": "127.0.0.1", "port": 9165}`
-    *Example*: `curl -X POST -H "Content-Type: application/json" -d '{"port": 9165}' http://localhost:8080/api/v1/tor1/config/controlport`
 
 ## Development
 
-* The Go application is structured into `cmd/torgo` (main application) and `internal/` (supporting packages).
-* Ensure Go (1.24+) is installed for local development.
+* The Go application is structured into `cmd/torgo` and `internal/` packages.
+* Ensure Go (1.24+) is installed.
 * Run `go mod tidy` to manage dependencies.
+* The `webui.html` uses a local `tailwind.css`. You'll need to provide this file (e.g., by downloading the full build from Tailwind's CDN or by using the Tailwind CLI to generate an optimized version based on `webui.html`). For the Web UI to correctly load `tailwind.css` when served by the Go app, you might need to adjust the Go app to serve static assets or embed `tailwind.css` similarly to `webui.html`. The current `webui.html` expects `tailwind.css` to be served from the same path level.
 
 ## Stopping the Service
 
 ```bash
 docker-compose down
 ```
+
+## Future Enhancements / TODO
+
+* More sophisticated load balancing strategies.
+* Full SOCKS5 server implementation for commands beyond CONNECT (e.g., using armon/go-socks5).
+* Enhanced Web UI with more interactive elements and visualizations (e.g., charts for traffic).
