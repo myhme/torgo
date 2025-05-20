@@ -1,0 +1,12 @@
+DataDirectory __DATADIR__
+SocksPort 0.0.0.0:__SOCKSPORT__
+ControlPort 0.0.0.0:__CONTROLPORT__
+DNSPort 0.0.0.0:__DNSPORT__
+
+CookieAuthentication 1
+Log notice stdout
+PidFile __PIDFILE__
+
+# Consider adding these for better stability with multiple instances if issues arise:
+# AvoidDiskWrites 1 # Might reduce I/O load, but check implications for state
+# MaxMemInQueues 20MB # Example, adjust based on resources
