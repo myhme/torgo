@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"golang.org/x/net/proxy"
-	"torgo/internal/config" // Assuming your module path is 'torgo'
+	"torgo/internal/config" 
 )
 
 // Instance represents a single backend Tor process and its state.
@@ -32,12 +32,15 @@ type Instance struct {
 	Mu                sync.Mutex 
 	httpClient        *http.Client 
 	activeControlConn net.Conn
-	controlCookieHex  string    // Cached hex-encoded cookie
+	controlCookieHex  string    
 	IsHealthy         bool      
 	LastHealthCheck   time.Time 
-	ConsecutiveFailures int     // For auto-NEWNYM logic
-	LastAutoRotateAttempt time.Time // For auto-NEWNYM logic
-
+	ConsecutiveFailures int     
+	
+	// Fields for IP Diversity Management
+	ExternalIP          string    // Last known external IP address
+	LastIPCheck         time.Time // Timestamp of the last successful IP check
+	LastDiversityRotate time.Time // Timestamp of the last rotation triggered by IP diversity logic
 
 	appConfig *config.AppConfig 
 }
@@ -64,34 +67,28 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 	return ti
 }
 
-// loadAndCacheControlCookieUnlocked attempts to read the cookie file.
-// If forceReload is true, it ignores any cached cookie.
-// Assumes ti.Mu is locked.
 func (ti *Instance) loadAndCacheControlCookieUnlocked(forceReload bool) error {
+	// Assumes ti.Mu is locked
 	if ti.controlCookieHex != "" && !forceReload {
-		return nil // Use cached version
+		return nil 
 	}
-	// log.Printf("Instance %d: Reading control cookie from %s (forceReload: %v)", ti.InstanceID, ti.AuthCookiePath, forceReload)
 	cookieBytes, err := os.ReadFile(ti.AuthCookiePath)
 	if err != nil {
-		ti.controlCookieHex = "" // Ensure cache is clear on error
+		ti.controlCookieHex = "" 
 		return fmt.Errorf("instance %d: failed to read cookie %s: %w", ti.InstanceID, ti.AuthCookiePath, err)
 	}
 	ti.controlCookieHex = hex.EncodeToString(cookieBytes)
-	// log.Printf("Instance %d: Successfully loaded control cookie.", ti.InstanceID)
 	return nil
 }
 
 func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, error) {
 	// Assumes ti.Mu is locked
-	// Attempt to load/reload cookie. If it fails, we can't authenticate.
-	if err := ti.loadAndCacheControlCookieUnlocked(false); err != nil { // false: don't force reload initially
+	if err := ti.loadAndCacheControlCookieUnlocked(false); err != nil { 
 		return nil, nil, fmt.Errorf("instance %d: pre-connect cookie load failed: %w", ti.InstanceID, err)
 	}
-    if ti.controlCookieHex == "" { // Still no cookie after attempt
+    if ti.controlCookieHex == "" { 
         return nil, nil, fmt.Errorf("instance %d: control cookie is empty after load attempt", ti.InstanceID)
     }
-
 
 	conn, err := net.DialTimeout("tcp", ti.ControlHost, 5*time.Second)
 	if err != nil {
@@ -119,10 +116,9 @@ func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, erro
 	trimmedStatus := strings.TrimSpace(statusLine)
 	if !strings.HasPrefix(trimmedStatus, "250 OK") {
 		conn.Close()
-		// If authentication specifically failed (515), invalidate the cached cookie.
-		if strings.HasPrefix(trimmedStatus, "515") { // Tor's code for auth failure
+		if strings.HasPrefix(trimmedStatus, "515") { 
 			log.Printf("Instance %d: Control port authentication failed (515). Invalidating cached cookie. Will retry reading on next attempt. Tor msg: %s", ti.InstanceID, trimmedStatus)
-			ti.controlCookieHex = "" // Invalidate cached cookie
+			ti.controlCookieHex = "" 
 		}
 		return nil, nil, fmt.Errorf("instance %d: tor control port authentication failed: %s", ti.InstanceID, trimmedStatus)
 	}
@@ -145,21 +141,20 @@ func (ti *Instance) SendTorCommand(command string) (string, error) {
 	var reader *bufio.Reader
 	var err error
 
-	// Try up to 2 times if first attempt fails (e.g. due to stale cookie or closed conn)
 	for attempt := 0; attempt < 2; attempt++ {
 		if ti.activeControlConn != nil {
 			conn = ti.activeControlConn
 			reader = bufio.NewReader(conn) 
 		} else {
-			// If controlCookieHex is empty here, it means a previous auth failed (515) and it was cleared.
-			// connectToTorControlUnlocked will try to reload it.
 			conn, reader, err = ti.connectToTorControlUnlocked()
 			if err != nil {
-				if attempt == 0 { // First attempt failed to connect
+				if attempt == 0 { 
 					log.Printf("Instance %d SendTorCommand: connection attempt %d failed: %v. Retrying...", ti.InstanceID, attempt+1, err)
-					ti.CloseControlConnUnlocked() // Ensure it's closed before retry
-					ti.controlCookieHex = "" // Force cookie reload on retry if connect failed due to auth
-					continue // Retry connection
+					ti.CloseControlConnUnlocked() 
+					if strings.Contains(err.Error(), "authentication failed") {
+						ti.controlCookieHex = "" 
+					}
+					continue 
 				}
 				return "", fmt.Errorf("instance %d SendTorCommand: connection phase failed after retries: %w", ti.InstanceID, err)
 			}
@@ -170,7 +165,7 @@ func (ti *Instance) SendTorCommand(command string) (string, error) {
 			conn.SetWriteDeadline(time.Time{})  
 			ti.CloseControlConnUnlocked()      
 			log.Printf("Instance %d: Write failed for command '%s' (%v), connection closed. Attempt %d.", ti.InstanceID, command, errWrite, attempt+1)
-			if attempt == 0 { continue } // Retry
+			if attempt == 0 { continue } 
 			return "", fmt.Errorf("instance %d: write failed for command '%s': %w", ti.InstanceID, command, errWrite)
 		}
 		conn.SetWriteDeadline(time.Time{}) 
@@ -186,11 +181,11 @@ func (ti *Instance) SendTorCommand(command string) (string, error) {
 			if errRead != nil {
 				conn.SetReadDeadline(time.Time{}) 
 				ti.CloseControlConnUnlocked()    
-				log.Printf("Instance %d: Read failed for command '%s' (%v), connection closed. Attempt %d. Partial: '%s'", ti.InstanceID, command, errRead, attempt+1, responseBuffer.String())
-				if errRead == io.EOF && responseBuffer.Len() > 0 { // EOF might be a valid end for some responses
+				// log.Printf("Instance %d: Read failed for command '%s' (%v), connection closed. Attempt %d. Partial: '%s'", ti.InstanceID, command, errRead, attempt+1, responseBuffer.String())
+				if errRead == io.EOF && responseBuffer.Len() > 0 { 
 					return strings.TrimSpace(responseBuffer.String()), nil
 				}
-				if attempt == 0 { break } // Break inner loop to retry outer SendTorCommand loop
+				if attempt == 0 { break } 
 				return responseBuffer.String(), fmt.Errorf("instance %d: failed to read full response for '%s': %w. Partial: '%s'", ti.InstanceID, command, errRead, responseBuffer.String())
 			}
 			responseBuffer.WriteString(line)
@@ -198,21 +193,19 @@ func (ti *Instance) SendTorCommand(command string) (string, error) {
 			if strings.HasPrefix(trimmedLine, "250 OK") { return strings.TrimSpace(responseBuffer.String()), nil } 
 			if strings.HasPrefix(trimmedLine, "250 ") && !strings.HasPrefix(trimmedLine, "250-") && !isMultiLine { return strings.TrimSpace(responseBuffer.String()), nil } 
 			if strings.HasPrefix(trimmedLine, "5") { 
-				// If it's a 515 error, specifically invalidate cookie for next top-level retry
 				if strings.HasPrefix(trimmedLine, "515") {
 					log.Printf("Instance %d: Received Tor error 515 for '%s'. Invalidating cookie for retry. Full error: %s", ti.InstanceID, command, trimmedLine)
 					ti.controlCookieHex = ""
 				} else {
-					log.Printf("Instance %d: Received Tor error response for command '%s': %s", ti.InstanceID, command, trimmedLine)
+					// log.Printf("Instance %d: Received Tor error response for command '%s': %s", ti.InstanceID, command, trimmedLine)
 				}
-				if attempt == 0 { break } // Break inner loop to retry outer SendTorCommand loop
+				if attempt == 0 { break } 
 				return strings.TrimSpace(responseBuffer.String()), fmt.Errorf("tor error: %s", trimmedLine)
 			}
 		}
 		conn.SetReadDeadline(time.Time{}) 
-		if attempt == 0 { continue } // If we broke from inner loop due to 5xx error on first attempt, retry SendTorCommand
+		if attempt == 0 { continue } 
 	}
-	// Should not be reached if logic is correct, but as a fallback:
 	return "", fmt.Errorf("instance %d: SendTorCommand exhausted retries for command '%s'", ti.InstanceID, command)
 }
 
@@ -236,18 +229,15 @@ func (ti *Instance) CheckHealth(ctx context.Context) bool {
 		checkErrMessage = fmt.Sprintf("timed out for control host %s", ti.ControlHost)
 	case res := <-ch:
 		expectedContent := "status/bootstrap-phase=PROGRESS=100 TAG=done SUMMARY=\"Done\""
-		if res.err == nil && strings.Contains(res.response, "PROGRESS=100") && strings.Contains(res.response, "TAG=done") {
-			// More robust check for the full expected line, potentially after "250-" or "250 "
-			if strings.Contains(res.response, expectedContent) {
+		if res.err == nil &&
+		   strings.Contains(res.response, "PROGRESS=100") &&
+		   strings.Contains(res.response, "TAG=done") {
+			if strings.Contains(res.response, expectedContent) || strings.Contains(res.response, "PROGRESS=100 TAG=done") { 
 				isCurrentlyHealthy = true
 				checkErrMessage = "Successfully bootstrapped"
 			} else {
-				// It has PROGRESS=100 and TAG=done, but not the full summary. Still consider it mostly healthy.
-				// This can happen if SendTorCommand returns a slightly different format.
-				// For now, let's be a bit lenient if the core parts are there.
 				isCurrentlyHealthy = true 
 				checkErrMessage = fmt.Sprintf("bootstrap 100%%, TAG=done, but summary/prefix mismatch: '%s'", firstNChars(res.response, 150))
-				// log.Printf("Instance %d: Health check lenient pass: %s", ti.InstanceID, checkErrMessage)
 			}
 		} else {
 			if res.err != nil {
@@ -262,7 +252,7 @@ func (ti *Instance) CheckHealth(ctx context.Context) bool {
 	if ti.IsHealthy != isCurrentlyHealthy {
 		log.Printf("Instance %d: Health status changed to %v (was %v). Reason/Details: %s", ti.InstanceID, isCurrentlyHealthy, ti.IsHealthy, checkErrMessage)
 	}
-	if !isCurrentlyHealthy && ti.IsHealthy { // Was healthy, now unhealthy
+	if !isCurrentlyHealthy && ti.IsHealthy { 
 		ti.ConsecutiveFailures++
 	} else if isCurrentlyHealthy {
 		ti.ConsecutiveFailures = 0
@@ -317,6 +307,23 @@ func (ti *Instance) GetHTTPClient() *http.Client {
 	}
 	return ti.httpClient
 }
+
+// SetExternalIP updates the instance's last known external IP and check time.
+func (ti *Instance) SetExternalIP(ip string) {
+    ti.Mu.Lock()
+    defer ti.Mu.Unlock()
+    ti.ExternalIP = ip
+    ti.LastIPCheck = time.Now()
+}
+
+// GetExternalIPInfo returns the last known external IP and check time.
+// Note: This method is not currently used by other packages but is here for completeness.
+func (ti *Instance) GetExternalIPInfo() (ip string, lastCheck time.Time) {
+    ti.Mu.Lock()
+    defer ti.Mu.Unlock()
+    return ti.ExternalIP, ti.LastIPCheck
+}
+
 
 func firstNChars(s string, n int) string { 
     if len(s) > n {

@@ -6,13 +6,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync" // Added for WaitGroup
+	"sync" 
 	"syscall"
 	"time"
 
 	"torgo/internal/api"
 	"torgo/internal/config"
 	"torgo/internal/health"
+	"torgo/internal/ipdiversity" 
+	// "torgo/internal/lb" // Removed unused import
 	"torgo/internal/proxy"
 	"torgo/internal/torinstance"
 )
@@ -35,30 +37,28 @@ func main() {
 	mainCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Perform initial health checks synchronously before starting proxies
 	log.Println("Performing initial health checks for all instances before starting proxy servers...")
 	var initialHealthCheckWG sync.WaitGroup
 	for _, instance := range backendInstances {
 		initialHealthCheckWG.Add(1)
 		go func(inst *torinstance.Instance) {
 			defer initialHealthCheckWG.Done()
-			// Use a separate context for initial checks that can be shorter if needed,
-			// or mainCtx if they should also be cancellable by shutdown signal.
-			// For simplicity, using mainCtx here.
 			inst.CheckHealth(mainCtx)
 		}(instance)
 	}
 	initialHealthCheckWG.Wait()
 	log.Println("Initial health checks completed for all instances.")
 
-	// Start periodic health monitoring (will also run its own first check, which is fine)
 	go health.Monitor(mainCtx, backendInstances, appCfg)
-
-	// Start common SOCKS5 proxy server
 	go proxy.StartSocksProxyServer(backendInstances, appCfg)
-
-	// Start common DNS proxy server
 	go proxy.StartDNSProxyServer(backendInstances, appCfg)
+	
+	if appCfg.MinInstancesForIPDiversityCheck > 0 && appCfg.NumTorInstances >= appCfg.MinInstancesForIPDiversityCheck {
+		go ipdiversity.MonitorIPDiversity(mainCtx, backendInstances, appCfg)
+	} else {
+		log.Println("IP Diversity Monitor: Disabled due to configuration (MinInstancesForIPDiversityCheck or NumTorInstances too low).")
+	}
+
 
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/webui", api.WebUIHandler)

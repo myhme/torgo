@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	DefaultTorAuthCookiePath = "/var/lib/tor/control_auth_cookie" // Base, will be appended with instance
+	DefaultTorAuthCookiePath = "/var/lib/tor/control_auth_cookie" 
 	DefaultIPCheckURL        = "https://check.torproject.org/api/ip"
 	DefaultHealthCheckInterval = 30 * time.Second
 	DefaultSocksTimeout      = 10 * time.Second
@@ -21,6 +21,11 @@ const (
 	DefaultControlBasePort   = 9160
 	DefaultDNSBasePort       = 9200
 	DefaultNumTorInstances   = 1
+
+	// New defaults for IP Diversity feature
+	DefaultIPDiversityCheckInterval   = 5 * time.Minute
+	DefaultIPDiversityRotationCooldown = 15 * time.Minute
+	DefaultMinInstancesForIPDiversityCheck = 2 // Only run if at least this many instances exist
 )
 
 // AppConfig holds the global configuration for the torgo application.
@@ -37,10 +42,13 @@ type AppConfig struct {
 	IPCheckURL          string
 	SocksTimeout        time.Duration
 
-	// LBMutex and LBCurrentIndex are removed as they are not needed for random selection.
-
 	// For staggered rotation (shared state)
-	IsGlobalRotationActive int32 // 0 for false, 1 for true (atomic)
+	IsGlobalRotationActive int32 
+
+	// New config for IP Diversity
+	IPDiversityCheckInterval   time.Duration
+	IPDiversityRotationCooldown time.Duration
+	MinInstancesForIPDiversityCheck int
 }
 
 var GlobalConfig *AppConfig
@@ -50,9 +58,7 @@ var once sync.Once
 func LoadConfig() *AppConfig {
 	once.Do(func() {
 		log.Println("Loading application configuration...")
-		cfg := &AppConfig{
-			// LBCurrentIndex: -1, // Removed
-		}
+		cfg := &AppConfig{}
 
 		nInstancesStr := os.Getenv("TOR_INSTANCES_CONFIGURED")
 		n, err := strconv.Atoi(nInstancesStr)
@@ -122,8 +128,32 @@ func LoadConfig() *AppConfig {
 			cfg.SocksTimeout = DefaultSocksTimeout
 		}
 
+		// IP Diversity Config
+		ipDiversityIntervalStr := os.Getenv("IP_DIVERSITY_CHECK_INTERVAL_SECONDS")
+		if ipDiversitySec, err := strconv.Atoi(ipDiversityIntervalStr); err == nil && ipDiversitySec > 0 {
+			cfg.IPDiversityCheckInterval = time.Duration(ipDiversitySec) * time.Second
+		} else {
+			cfg.IPDiversityCheckInterval = DefaultIPDiversityCheckInterval
+		}
+
+		ipDiversityCooldownStr := os.Getenv("IP_DIVERSITY_ROTATION_COOLDOWN_SECONDS")
+		if ipDiversityCooldownSec, err := strconv.Atoi(ipDiversityCooldownStr); err == nil && ipDiversityCooldownSec > 0 {
+			cfg.IPDiversityRotationCooldown = time.Duration(ipDiversityCooldownSec) * time.Second
+		} else {
+			cfg.IPDiversityRotationCooldown = DefaultIPDiversityRotationCooldown
+		}
+
+		minInstancesStr := os.Getenv("MIN_INSTANCES_FOR_IP_DIVERSITY_CHECK")
+		if minInst, err := strconv.Atoi(minInstancesStr); err == nil && minInst >= 0 { // Allow 0 to disable
+			cfg.MinInstancesForIPDiversityCheck = minInst
+		} else {
+			cfg.MinInstancesForIPDiversityCheck = DefaultMinInstancesForIPDiversityCheck
+		}
+
+
 		GlobalConfig = cfg
-		log.Printf("Configuration loaded: NumInstances=%d, APIPort=%s, CommonSOCKS=%s, CommonDNS=%s", cfg.NumTorInstances, cfg.APIPort, cfg.CommonSocksPort, cfg.CommonDNSPort)
+		log.Printf("Configuration loaded: NumInstances=%d, APIPort=%s, CommonSOCKS=%s, CommonDNS=%s, IPDiversityCheckInterval=%v", 
+			cfg.NumTorInstances, cfg.APIPort, cfg.CommonSocksPort, cfg.CommonDNSPort, cfg.IPDiversityCheckInterval)
 	})
 	return GlobalConfig
 }

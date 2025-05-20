@@ -29,7 +29,6 @@ func firstNChars(s string, n int) string {
     return s
 }
 
-// WebUIHandler serves the webui.html file.
 func WebUIHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/webui" && r.URL.Path != "/webui/" { 
         http.NotFound(w, r)
@@ -46,7 +45,6 @@ func WebUIHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(htmlContent)
 }
 
-// AppDetailsHandler serves basic application details like number of instances.
 func AppDetailsHandler(w http.ResponseWriter, r *http.Request, appCfg *config.AppConfig) {
 	details := map[string]interface{}{
 		"num_instances":       appCfg.NumTorInstances,
@@ -55,6 +53,7 @@ func AppDetailsHandler(w http.ResponseWriter, r *http.Request, appCfg *config.Ap
 		"api_port":            appCfg.APIPort,
 		"rotation_stagger_delay_seconds": int(appCfg.RotationStaggerDelay.Seconds()),
 		"health_check_interval_seconds": int(appCfg.HealthCheckInterval.Seconds()),
+		"ip_diversity_check_interval_seconds": int(appCfg.IPDiversityCheckInterval.Seconds()), // Expose new config
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(details)
@@ -125,6 +124,9 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 		} else {
 			log.Printf("API: Staggered rotation: Instance %d NEWNYM response: %s", instance.InstanceID, firstNChars(response, 60))
 			fmt.Fprintf(w, "Instance %d NEWNYM response: %s\n", instance.InstanceID, firstNChars(response,60))
+			instance.Mu.Lock()
+			instance.LastDiversityRotate = time.Now() // Consider this a manual-like rotation for cooldown
+			instance.Mu.Unlock()
 		}
 		if okFlusher { flusher.Flush() }
 
@@ -145,11 +147,9 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 	if okFlusher { flusher.Flush() }
 }
 
-// MasterAPIRouter routes API calls to the appropriate handler.
 func MasterAPIRouter(w http.ResponseWriter, r *http.Request, instances []*torinstance.Instance, appCfg *config.AppConfig) {
 	path := r.URL.Path
 	
-	// Handle global (non-instance-specific) routes first
 	if path == "/api/v1/app-details" {
 		AppDetailsHandler(w, r, appCfg)
 		return
@@ -183,6 +183,9 @@ func MasterAPIRouter(w http.ResponseWriter, r *http.Request, instances []*torins
 		if r.Method != http.MethodPost && r.Method != http.MethodGet { http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed); return }
 		response, err := instance.SendTorCommand("SIGNAL NEWNYM")
 		if err != nil { http.Error(w, "Failed to rotate instance "+instanceIDStr+": "+err.Error(), http.StatusInternalServerError); return }
+		instance.Mu.Lock()
+		instance.LastDiversityRotate = time.Now() // Track manual rotation
+		instance.Mu.Unlock()
 		fmt.Fprintf(w, "Instance %d NEWNYM: %s", instance.InstanceID, response)
 	
 	case "health":
@@ -235,14 +238,41 @@ func MasterAPIRouter(w http.ResponseWriter, r *http.Request, instances []*torins
 		body, errRead := io.ReadAll(resp.Body)
 		if errRead != nil {http.Error(w, "Failed to read IP response body from instance "+instanceIDStr+": "+errRead.Error(), http.StatusInternalServerError); return}
 
-		var ipJsonResponse map[string]interface{}
-		if json.Unmarshal(body, &ipJsonResponse) == nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(body)
-		} else {
-			w.Header().Set("Content-Type", "text/plain")
-			w.Write(body)
+		var ipJsonResponse struct { // Define a struct for expected JSON IP response
+			IP     string `json:"IP"`
+			IsTor  bool   `json:"IsTor"`
+			// Add other fields if your IP check service returns more
 		}
+
+		var plainTextResponse string
+		isJsonResponse := false
+		if errJson := json.Unmarshal(body, &ipJsonResponse); errJson == nil && ipJsonResponse.IP != "" {
+			instance.SetExternalIP(ipJsonResponse.IP) // Update instance's IP
+			isJsonResponse = true
+		} else {
+			// If not JSON or IP field is missing, try to treat as plain text IP
+			// This is a basic attempt; more robust parsing might be needed for various plain text IP services
+			trimmedBody := strings.TrimSpace(string(body))
+			if net.ParseIP(trimmedBody) != nil {
+				instance.SetExternalIP(trimmedBody)
+				plainTextResponse = trimmedBody
+			} else {
+				log.Printf("Instance %d: IP response was not valid JSON with IP field, nor a plain IP: %s", instance.InstanceID, firstNChars(trimmedBody, 50))
+			}
+		}
+		
+		if isJsonResponse {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(body) // Send original JSON back
+		} else if plainTextResponse != "" {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, plainTextResponse)
+		} else {
+			// Fallback if parsing failed completely
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "Could not determine IP from response: "+string(body))
+		}
+
 
 	case "config":
 		handleInstanceConfig(w, r, instance, parts, appCfg)
@@ -339,13 +369,16 @@ func handleInstanceConfig(w http.ResponseWriter, r *http.Request, instance *tori
 	} else { 
 		if r.Method != http.MethodGet { http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed); return }
 		instance.Mu.Lock()
+		externalIP, lastIPCheck := instance.ExternalIP, instance.LastIPCheck
 		cfgData := map[string]interface{}{
 			"instance_id":        instance.InstanceID,
 			"control_host":       instance.ControlHost,
 			"backend_socks_host": instance.BackendSocksHost,
 			"backend_dns_host":   instance.BackendDNSHost,
 			"is_healthy":         instance.IsHealthy,
-			"last_health_check":  instance.LastHealthCheck.Format(time.RFC3339),
+			"last_health_check":  instance.LastHealthCheck.Format(time.RFC3339Nano), // More precision
+			"external_ip":        externalIP,
+			"last_ip_check":      lastIPCheck.Format(time.RFC3339Nano), // More precision
 			"auth_cookie_path":   instance.AuthCookiePath,
 			"data_dir":           instance.DataDir,
 		}
