@@ -80,9 +80,9 @@ for i in $(seq 1 "$N_INSTANCES"); do
 
     echo "Setting up Tor instance $i:"
     echo "  DataDir: $DATA_DIR"
-    echo "  SocksPort: 127.0.0.1:$CURRENT_SOCKS_PORT" # Listen on localhost only
-    echo "  ControlPort: 127.0.0.1:$CURRENT_CONTROL_PORT" # Listen on localhost only
-    echo "  DNSPort: 127.0.0.1:$CURRENT_DNS_PORT" # Listen on localhost only
+    echo "  SocksPort: 0.0.0.0:$CURRENT_SOCKS_PORT" # Listen on localhost only
+    echo "  ControlPort: 0.0.0.1:$CURRENT_CONTROL_PORT" # Listen on localhost only
+    echo "  DNSPort: 0.0.0.1:$CURRENT_DNS_PORT" # Listen on localhost only
     echo "  Torrc: $TORRC_FILE"
     echo "  PID File: $PID_FILE"
 
@@ -93,9 +93,9 @@ for i in $(seq 1 "$N_INSTANCES"); do
 
     # Create torrc file from template for the current instance
     sed -e "s|__DATADIR__|${DATA_DIR}|g" \
-        -e "s|__SOCKSPORT__|127.0.0.1:${CURRENT_SOCKS_PORT}|g" \
-        -e "s|__CONTROLPORT__|127.0.0.1:${CURRENT_CONTROL_PORT}|g" \
-        -e "s|__DNSPORT__|127.0.0.1:${CURRENT_DNS_PORT}|g" \
+        -e "s|__SOCKSPORT__|0.0.0.0:${CURRENT_SOCKS_PORT}|g" \
+        -e "s|__CONTROLPORT__|0.0.0.1:${CURRENT_CONTROL_PORT}|g" \
+        -e "s|__DNSPORT__|0.0.0.0:${CURRENT_DNS_PORT}|g" \
         -e "s|__PIDFILE__|${PID_FILE}|g" \
         "$TORRC_TEMPLATE" > "$TORRC_FILE"
 
