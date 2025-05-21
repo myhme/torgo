@@ -20,7 +20,7 @@ func handleDNSQueryDirectToTorDNSPort(w dns.ResponseWriter, r *dns.Msg, instance
 		return
 	}
 
-	backendInstance, err := lb.GetNextHealthyInstance(instances) // appCfg removed
+	backendInstance, err := lb.GetNextHealthyInstance(instances, appCfg) 
 	if err != nil {
 		log.Printf("DNS (Direct): No healthy backend Tor instance for query %s from %s: %v", r.Question[0].Name, w.RemoteAddr(), err)
 		m := new(dns.Msg)

@@ -1,28 +1,43 @@
+# torrc.template for torgo instances
+
+## Instance-specific settings - these will be replaced by entrypoint.sh
 DataDirectory __DATADIR__
-SocksPort 0.0.0.0:__SOCKSPORT__
-ControlPort 0.0.0.0:__CONTROLPORT__
-DNSPort 0.0.0.0:__DNSPORT__
-
-CookieAuthentication 1
-Log notice stdout
 PidFile __PIDFILE__
+SocksPort __SOCKSPORT__
+ControlPort __CONTROLPORT__
+DNSPort __DNSPORT__
 
-# Disable IPv6 for client connections and exits
-ClientUseIPv6 0
+## Common settings for all instances
+Log notice stdout
+Log notice file /var/log/tor/instance.log # Consider if file logging is needed per instance or just stdout
+RunAsDaemon 0 # Important for Docker, torgo manages the processes
+AvoidDiskWrites 1 # Good for performance and SD card longevity if applicable
+CookieAuthentication 1
+# CookieAuthFileGroupReadable 1 # If another process needs to read the cookie, not typical for torgo
+# ControlSocketGroupReadable 1 # If another process needs to access control socket
+
+## You might want to configure GeoIP files if you use country-based node selection extensively
+## and the default paths are not suitable or you want to use custom files.
+## Tor usually finds these automatically if installed system-wide.
+# GeoIPFile /usr/share/tor/geoip
+# GeoIPv6File /usr/share/tor/geoip6
+
+## Performance related (optional, use with care)
+# NumCPUs 1 # If you want to limit Tor's CPU usage per instance
+# OutboundBindAddress IP # If you have multiple outbound IPs on the host
+
+## Node selection (can be overridden via control port by torgo)
+# ExitNodes {us},{gb}
+# ExcludeNodes {ru},{cn}
+# EntryNodes node,node,node
+StrictNodes 1 # If 1, Tor will not build circuits if ExitNodes/EntryNodes cannot be satisfied.
+
+## Other useful options
+SafeLogging 1 # Set to 1 to scrub IPs from logs, 0 for more detail (debugging)
+ClientOnly 1 # If these instances should not act as relays (usually desired)
+# FetchDirInfoEarly 1 # May help bootstrap faster
+# FetchUselessDescriptors 1 # May help with reachability
+
+# Disable IPv6 if not used or causing issues (sysctls in docker-compose also handle this)
 IPv6Exit 0
-
-# Ensure IPv4 is used by clients
-ClientUseIPv4 1
-
-# Configure as a client-only node (not a relay)
-ClientOnly 1
-
-# Performance and Security/Privacy enhancements
-AvoidDiskWrites 1
-SafeLogging 1
-CircuitPadding 1
-ReducedCircuitPadding 0
-MaxCircuitDirtiness 300
-
-# Consider adding these for better stability with multiple instances if issues arise:
-# MaxMemInQueues 20MB # Example, adjust based on resources
+ClientUseIPv6 0
