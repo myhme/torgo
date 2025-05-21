@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"log"
+	"log/slog" // Import slog
 	"net" 
 	"strings" 
 	"time"
@@ -20,14 +20,24 @@ func handleDNSQueryDirectToTorDNSPort(w dns.ResponseWriter, r *dns.Msg, instance
 		return
 	}
 
+	qName := r.Question[0].Name
+	clientAddr := w.RemoteAddr().String()
+
 	backendInstance, err := lb.GetNextHealthyInstance(instances, appCfg) 
 	if err != nil {
-		log.Printf("DNS (Direct): No healthy backend Tor instance for query %s from %s: %v", r.Question[0].Name, w.RemoteAddr(), err)
+		slog.Warn("DNS (Direct): No healthy backend Tor instance for query.", "query_name", qName, "client_addr", clientAddr, slog.Any("error", err))
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)
 		return
 	}
+
+	slog.Debug("DNS (Direct): Forwarding query to backend Tor DNS.", 
+		"query_name", qName, 
+		"client_addr", clientAddr, 
+		"backend_instance_id", backendInstance.InstanceID,
+		"backend_dns_host", backendInstance.BackendDNSHost,
+	)
 
 	dnsClient := new(dns.Client)
 	dnsClient.Timeout = 5 * time.Second 
@@ -40,14 +50,21 @@ func handleDNSQueryDirectToTorDNSPort(w dns.ResponseWriter, r *dns.Msg, instance
 	response, _, err := dnsClient.Exchange(r, targetDNSAddr) 
 
 	if err != nil {
-		log.Printf("DNS (Direct): Failed to query backend Tor DNS %s for %s from %s: %v", targetDNSAddr, r.Question[0].Name, w.RemoteAddr(), err)
+		slog.Error("DNS (Direct): Failed to query backend Tor DNS.", 
+			"target_dns_addr", targetDNSAddr, 
+			"query_name", qName, 
+			"client_addr", clientAddr, 
+			slog.Any("error", err))
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)
 		return
 	}
 	if response == nil { 
-		log.Printf("DNS (Direct): Received nil response from backend Tor DNS %s for %s from %s", targetDNSAddr, r.Question[0].Name, w.RemoteAddr())
+		slog.Error("DNS (Direct): Received nil response from backend Tor DNS.", 
+			"target_dns_addr", targetDNSAddr, 
+			"query_name", qName, 
+			"client_addr", clientAddr)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)
@@ -65,32 +82,22 @@ func StartDNSProxyServer(instances []*torinstance.Instance, appCfg *config.AppCo
 	}
 	dns.HandleFunc(".", dnsHandler)
 
-
-	go func() {
-		serverUDP := &dns.Server{Addr: addr, Net: "udp", ReusePort: true}
-		log.Printf("DNS proxy (direct to Tor DNSPort) listening on %s (UDP)", addr)
-		if err := serverUDP.ListenAndServe(); err != nil {
-			if err != nil && err.Error() != "dns: Server closed" && !strings.Contains(err.Error(), "use of closed network connection") { 
-				log.Fatalf("Failed to start DNS UDP proxy on %s: %v", addr, err)
-			} else if err != nil { 
-				log.Printf("DNS UDP proxy server on %s shut down: %v", addr, err)
-			} else { 
-				log.Printf("DNS UDP proxy server on %s shut down gracefully.", addr)
-			}
-		}
-	}()
-
-	go func() {
-		serverTCP := &dns.Server{Addr: addr, Net: "tcp", ReusePort: true}
-		log.Printf("DNS proxy (direct to Tor DNSPort) listening on %s (TCP)", addr)
-		if err := serverTCP.ListenAndServe(); err != nil {
-			if err != nil && err.Error() != "dns: Server closed" && !strings.Contains(err.Error(), "use of closed network connection") {
-				log.Fatalf("Failed to start DNS TCP proxy on %s: %v", addr, err)
-			} else if err != nil {
-				log.Printf("DNS TCP proxy server on %s shut down: %v", addr, err)
+	startServer := func(netType string) {
+		server := &dns.Server{Addr: addr, Net: netType, ReusePort: true}
+		slog.Info("DNS proxy (direct to Tor DNSPort) listening.", "protocol", netType, "address", addr)
+		err := server.ListenAndServe()
+		if err != nil {
+			// "dns: Server closed" and "use of closed network connection" are expected on shutdown.
+			if err.Error() != "dns: Server closed" && !strings.Contains(err.Error(), "use of closed network connection") {
+				slog.Error("Failed to start DNS proxy server.", "protocol", netType, "address", addr, slog.Any("error", err))
+				// Consider if this should be fatal for the whole app. For now, just log.
+				// os.Exit(1) // If DNS proxy is critical
 			} else {
-				log.Printf("DNS TCP proxy server on %s shut down gracefully.", addr)
+				slog.Info("DNS proxy server shut down.", "protocol", netType, "address", addr, slog.Any("error", err))
 			}
 		}
-	}()
+	}
+
+	go startServer("udp")
+	go startServer("tcp")
 }

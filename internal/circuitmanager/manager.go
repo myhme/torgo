@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog" // Import slog
 	"net"
 	"net/http"
 	"strings"
@@ -18,18 +18,16 @@ import (
 )
 
 var (
-	// circuitRotationInProgress ensures only one managed rotation (age or diversity) happens globally
-	// across all instances during a stagger delay period.
 	circuitRotationInProgress int32
 )
 
 // CircuitManager orchestrates circuit rotation and performance testing.
 type CircuitManager struct {
-	appCfg   *config.AppConfig
+	appCfg    *config.AppConfig
 	instances []*torinstance.Instance
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 }
 
 // New creates a new CircuitManager.
@@ -46,11 +44,11 @@ func New(ctx context.Context, appCfg *config.AppConfig, instances []*torinstance
 // Start begins the monitoring loops for circuit management and performance testing.
 func (cm *CircuitManager) Start() {
 	if !cm.appCfg.CircuitManagerEnabled && !cm.appCfg.PerfTestEnabled {
-		log.Println("CircuitManager & PerfTester: Both disabled by configuration. Manager not starting.")
+		slog.Info("CircuitManager & PerfTester: Both disabled by configuration. Manager not starting.")
 		return
 	}
 
-	log.Println("CircuitManager: Starting...")
+	slog.Info("CircuitManager: Starting...")
 	cm.wg.Add(1)
 	go cm.rotationLoop()
 
@@ -62,23 +60,23 @@ func (cm *CircuitManager) Start() {
 
 // Stop signals the manager to stop and waits for its goroutines to finish.
 func (cm *CircuitManager) Stop() {
-	log.Println("CircuitManager: Stopping...")
+	slog.Info("CircuitManager: Stopping...")
 	cm.cancel()
 	cm.wg.Wait()
-	log.Println("CircuitManager: Stopped.")
+	slog.Info("CircuitManager: Stopped.")
 }
 
 // rotationLoop periodically checks instances for circuit rotation needs (age, IP diversity).
 func (cm *CircuitManager) rotationLoop() {
 	defer cm.wg.Done()
 	if !cm.appCfg.CircuitManagerEnabled {
-		log.Println("CircuitManager: Rotation loop disabled by configuration.")
+		slog.Info("CircuitManager: Rotation loop disabled by configuration.")
 		return
 	}
 
 	// Determine a sensible check interval, e.g., 1/5th of the shortest relevant period, or a minimum.
 	checkInterval := cm.appCfg.CircuitMaxAge / 5
-	if cm.appCfg.IPDiversityCheckEnabled && cm.appCfg.IPDiversitySubnetCheckInterval/5 < checkInterval {
+	if cm.appCfg.IPDiversityCheckEnabled && cm.appCfg.IPDiversitySubnetCheckInterval > 0 && cm.appCfg.IPDiversitySubnetCheckInterval/5 < checkInterval {
 		checkInterval = cm.appCfg.IPDiversitySubnetCheckInterval / 5
 	}
 	if checkInterval < 1*time.Minute { // Minimum check interval
@@ -88,18 +86,18 @@ func (cm *CircuitManager) rotationLoop() {
 	    checkInterval = cm.appCfg.CircuitMaxAge / 5
 		if checkInterval < 1*time.Minute { checkInterval = 1*time.Minute }
 	} else if checkInterval == 0 { // if no rotation criteria are meaningfully enabled with timing
-		log.Println("CircuitManager: Rotation loop effectively disabled as no timed rotation criteria are set.")
+		slog.Info("CircuitManager: Rotation loop effectively disabled as no timed rotation criteria are set.")
 		return
 	}
 
 
-	log.Printf("CircuitManager: Rotation check interval: %v", checkInterval)
+	slog.Info("CircuitManager: Rotation check interval.", "interval", checkInterval)
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
 	// Initial IP diversity check run if enabled
 	if cm.appCfg.IPDiversityCheckEnabled && len(cm.instances) >= cm.appCfg.IPDiversityMinInstances {
-		log.Println("CircuitManager: Performing initial IP diversity check...")
+		slog.Info("CircuitManager: Performing initial IP diversity check...")
 		cm.checkForIPDiversityAndRotate()
 	}
 
@@ -109,11 +107,11 @@ func (cm *CircuitManager) rotationLoop() {
 		case <-ticker.C:
 			cm.processEligibleInstanceForRotation()
 			// IP diversity check might have its own rhythm or be part of the main check
-			if cm.appCfg.IPDiversityCheckEnabled && time.Since(lastIPDiversityGlobalCheckTime) > cm.appCfg.IPDiversitySubnetCheckInterval {
+			if cm.appCfg.IPDiversityCheckEnabled && cm.appCfg.IPDiversitySubnetCheckInterval > 0 && time.Since(lastIPDiversityGlobalCheckTime) > cm.appCfg.IPDiversitySubnetCheckInterval {
 				cm.checkForIPDiversityAndRotate()
 			}
 		case <-cm.ctx.Done():
-			log.Println("CircuitManager: Rotation loop stopping due to context cancellation.")
+			slog.Info("CircuitManager: Rotation loop stopping due to context cancellation.")
 			return
 		}
 	}
@@ -126,7 +124,7 @@ var lastIPDiversityGlobalCheckTime time.Time
 func (cm *CircuitManager) processEligibleInstanceForRotation() {
 	if !cm.appCfg.CircuitManagerEnabled { return }
 	if !atomic.CompareAndSwapInt32(&circuitRotationInProgress, 0, 1) {
-		// log.Println("CircuitManager: A managed rotation is already in progress or respecting stagger. Skipping this cycle.")
+		slog.Debug("CircuitManager: A managed rotation is already in progress or respecting stagger. Skipping this cycle.")
 		return
 	}
 	// Successfully acquired the "lock"
@@ -134,7 +132,6 @@ func (cm *CircuitManager) processEligibleInstanceForRotation() {
 	var instanceToRotate *torinstance.Instance
 	var oldestRecreationTime time.Time
 	var rotationReason string
-
 	now := time.Now()
 
 	// Check for age-based rotation
@@ -144,9 +141,7 @@ func (cm *CircuitManager) processEligibleInstanceForRotation() {
 			isHealthy := inst.IsHealthy
 			lastRecTime := inst.LastCircuitRecreationTime
 			inst.Mu.Unlock()
-
 			if !isHealthy { continue }
-
 			circuitAge := now.Sub(lastRecTime)
 			if lastRecTime.IsZero() { // Never rotated, consider it infinitely old for rotation purposes
 				circuitAge = cm.appCfg.CircuitMaxAge + 1*time.Second // Ensure it's older
@@ -165,9 +160,10 @@ func (cm *CircuitManager) processEligibleInstanceForRotation() {
 
 
 	if instanceToRotate != nil {
-		log.Printf("CircuitManager: Instance %d selected for rotation due to %s. Last recreation: %v.",
-			instanceToRotate.InstanceID, rotationReason, oldestRecreationTime)
-
+		slog.Info("CircuitManager: Instance selected for rotation.", 
+			"instance_id", instanceToRotate.InstanceID, 
+			"reason", rotationReason, 
+			"last_recreation", oldestRecreationTime.Format(time.RFC3339))
 		go cm.rotateInstanceWithStagger(instanceToRotate, rotationReason)
 	} else {
 		atomic.StoreInt32(&circuitRotationInProgress, 0) // No instance found, release lock
@@ -181,11 +177,11 @@ func (cm *CircuitManager) checkForIPDiversityAndRotate() {
 		return
 	}
 	if !atomic.CompareAndSwapInt32(&circuitRotationInProgress, 0, 1) {
-		// log.Println("CircuitManager: IP Diversity check skipped, a rotation is already in progress or respecting stagger.")
+		slog.Debug("CircuitManager: IP Diversity check skipped, a rotation is already in progress or respecting stagger.")
 		return
 	}
 	lastIPDiversityGlobalCheckTime = time.Now()
-	// log.Println("CircuitManager: Running IP diversity check...")
+	slog.Debug("CircuitManager: Running IP diversity check...")
 
 	currentIPs := make(map[int]string)
 	healthyInstancesForCheck := make([]*torinstance.Instance, 0)
@@ -195,25 +191,28 @@ func (cm *CircuitManager) checkForIPDiversityAndRotate() {
 		instance.Mu.Lock()
 		isHealthy := instance.IsHealthy
 		lastIPCheck := instance.LastIPCheck
+		currentExtIP := instance.ExternalIP
 		instance.Mu.Unlock()
 
 		if !isHealthy { continue }
 		healthyInstancesForCheck = append(healthyInstancesForCheck, instance)
 
-		// Fetch IP if it's stale or never fetched
-		// Stale for diversity check could be shorter than general PerfTest interval
 		ipStaleDuration := cm.appCfg.IPDiversitySubnetCheckInterval / 2
 		if ipStaleDuration < 1*time.Minute { ipStaleDuration = 1*time.Minute}
+		if cm.appCfg.IPDiversitySubnetCheckInterval == 0 { ipStaleDuration = 5 * time.Minute } // Default if interval is 0
 
-		if instance.ExternalIP == "" || now.Sub(lastIPCheck) > ipStaleDuration {
-			cm.fetchAndUpdateInstanceIP(instance)
+
+		if currentExtIP == "" || now.Sub(lastIPCheck) > ipStaleDuration {
+			cm.fetchAndUpdateInstanceIP(instance) // Fetches and sets IP inside instance
+			instance.Mu.Lock() // Re-lock to get potentially updated IP
+			currentExtIP = instance.ExternalIP
+			instance.Mu.Unlock()
 		}
-		instance.Mu.Lock()
-		if instance.ExternalIP != "" { currentIPs[instance.InstanceID] = instance.ExternalIP }
-		instance.Mu.Unlock()
+		if currentExtIP != "" { currentIPs[instance.InstanceID] = currentExtIP }
 	}
 
 	if len(currentIPs) < cm.appCfg.IPDiversityMinInstances {
+		slog.Debug("CircuitManager: Not enough IPs fetched for diversity check.", "fetched_count", len(currentIPs), "min_required", cm.appCfg.IPDiversityMinInstances)
 		atomic.StoreInt32(&circuitRotationInProgress, 0) // Release lock
 		return
 	}
@@ -223,7 +222,6 @@ func (cm *CircuitManager) checkForIPDiversityAndRotate() {
 		parsedIP := net.ParseIP(ipStr)
 		if parsedIP == nil || parsedIP.To4() == nil { continue }
 		subnetPrefix := fmt.Sprintf("%d.%d.%d", parsedIP.To4()[0], parsedIP.To4()[1], parsedIP.To4()[2])
-		
 		var instPtr *torinstance.Instance
 		for _, inst := range healthyInstancesForCheck {
 			if inst.InstanceID == instanceID { instPtr = inst; break }
@@ -241,7 +239,6 @@ func (cm *CircuitManager) checkForIPDiversityAndRotate() {
 				inst.Mu.Lock()
 				lastRot := inst.LastDiversityRotate
 				inst.Mu.Unlock()
-
 				if now.Sub(lastRot) > cm.appCfg.IPDiversityRotationCooldown { // Check cooldown for this specific instance
 					if instanceToRotateIPDiversity == nil || lastRot.Before(oldestDiversityRotateTime) {
 						instanceToRotateIPDiversity = inst
@@ -255,10 +252,11 @@ func (cm *CircuitManager) checkForIPDiversityAndRotate() {
 
 	if instanceToRotateIPDiversity != nil {
 		reason := fmt.Sprintf("IP diversity in subnet %s.0/24", qualifyingSubnet)
-		log.Printf("CircuitManager: Instance %d selected for rotation due to %s.", instanceToRotateIPDiversity.InstanceID, reason)
+		slog.Info("CircuitManager: Instance selected for IP diversity rotation.", "instance_id", instanceToRotateIPDiversity.InstanceID, "reason", reason)
 		go cm.rotateInstanceWithStagger(instanceToRotateIPDiversity, reason)
 		// rotateInstanceWithStagger will release the circuitRotationInProgress lock
 	} else {
+		slog.Debug("CircuitManager: No instance eligible for IP diversity rotation at this time.")
 		atomic.StoreInt32(&circuitRotationInProgress, 0) // No IP diversity rotation needed, release lock
 	}
 }
@@ -269,28 +267,27 @@ func (cm *CircuitManager) rotateInstanceWithStagger(instance *torinstance.Instan
 	// This function will release it after the stagger.
 	defer atomic.StoreInt32(&circuitRotationInProgress, 0)
 
-	log.Printf("CircuitManager: Rotating instance %d (Reason: %s). Sending NEWNYM.", instance.InstanceID, reason)
+	slog.Info("CircuitManager: Rotating instance, sending NEWNYM.", "instance_id", instance.InstanceID, "reason", reason)
 	// true to update LastCircuitRecreationTime
 	_, err := instance.SendTorCommand("SIGNAL NEWNYM", true)
 
 	if err != nil {
-		log.Printf("CircuitManager: Error rotating instance %d: %v", instance.InstanceID, err)
+		slog.Error("CircuitManager: Error rotating instance.", "instance_id", instance.InstanceID, slog.Any("error", err))
 	} else {
-		log.Printf("CircuitManager: Successfully sent NEWNYM to instance %d.", instance.InstanceID)
+		slog.Info("CircuitManager: Successfully sent NEWNYM to instance.", "instance_id", instance.InstanceID)
 		instance.Mu.Lock()
 		if strings.Contains(reason, "IP diversity") {
 			instance.LastDiversityRotate = time.Now()
 		}
-		// LastCircuitRecreationTime is updated by SendTorCommand
 		instance.Mu.Unlock()
 	}
 
 	if cm.appCfg.CircuitRotationStagger > 0 {
-		// log.Printf("CircuitManager: Staggering for %v after rotating instance %d.", cm.appCfg.CircuitRotationStagger, instance.InstanceID)
+		slog.Debug("CircuitManager: Staggering after rotation.", "instance_id", instance.InstanceID, "delay", cm.appCfg.CircuitRotationStagger)
 		select {
 		case <-time.After(cm.appCfg.CircuitRotationStagger):
 		case <-cm.ctx.Done():
-			log.Printf("CircuitManager: Stagger delay for instance %d interrupted by shutdown.", instance.InstanceID)
+			slog.Info("CircuitManager: Stagger delay interrupted by shutdown.", "instance_id", instance.InstanceID)
 			return
 		}
 	}
@@ -302,29 +299,33 @@ func (cm *CircuitManager) rotateInstanceWithStagger(instance *torinstance.Instan
 func (cm *CircuitManager) performanceTestLoop() {
 	defer cm.wg.Done()
 	if !cm.appCfg.PerfTestEnabled {
-		log.Println("CircuitManager: Performance test loop disabled.")
+		slog.Info("CircuitManager: Performance test loop disabled.")
 		return
 	}
-	log.Printf("CircuitManager: Performance test loop started. Interval: %v", cm.appCfg.PerfTestInterval)
+	slog.Info("CircuitManager: Performance test loop started.", "interval", cm.appCfg.PerfTestInterval)
+	
+	if cm.appCfg.PerfTestInterval <= 0 {
+		slog.Warn("CircuitManager: Performance test interval is not positive, loop will not run effectively.")
+		return
+	}
 	ticker := time.NewTicker(cm.appCfg.PerfTestInterval)
 	defer ticker.Stop()
 
-	// Run initial tests for all instances
-	cm.runAllPerformanceTests()
+	cm.runAllPerformanceTests() // Initial run
 
 	for {
 		select {
 		case <-ticker.C:
 			cm.runAllPerformanceTests()
 		case <-cm.ctx.Done():
-			log.Println("CircuitManager: Performance test loop stopping.")
+			slog.Info("CircuitManager: Performance test loop stopping.")
 			return
 		}
 	}
 }
 
 func (cm *CircuitManager) runAllPerformanceTests() {
-	// log.Println("CircuitManager: Running performance tests for all healthy instances...")
+	slog.Debug("CircuitManager: Running performance tests for all healthy instances...")
 	for _, instance := range cm.instances {
 		instance.Mu.Lock()
 		isHealthy := instance.IsHealthy
@@ -341,7 +342,7 @@ func (cm *CircuitManager) runAllPerformanceTests() {
 func (cm *CircuitManager) performInstanceTests(instance *torinstance.Instance) {
 	httpClient := instance.GetHTTPClient()
 	if httpClient == nil { // Should not happen if healthy
-		log.Printf("CircuitManager: Instance %d: HTTP client not available for perf test.", instance.InstanceID)
+		slog.Warn("CircuitManager: HTTP client not available for perf test.", "instance_id", instance.InstanceID)
 		return
 	}
 
@@ -352,18 +353,17 @@ func (cm *CircuitManager) performInstanceTests(instance *torinstance.Instance) {
 		req, _ := http.NewRequestWithContext(cm.ctx, http.MethodHead, targetURL, nil)
 		resp, err := httpClient.Do(req)
 		latency := time.Since(startTime)
-
 		failed := false
 		if err != nil {
-			log.Printf("CircuitManager: Instance %d: Latency test to %s (%s) FAILED: %v", instance.InstanceID, alias, targetURL, err)
+			slog.Warn("CircuitManager: Latency test FAILED (request error).", "instance_id", instance.InstanceID, "target_alias", alias, "url", targetURL, slog.Any("error", err))
 			failed = true
 		} else {
 			resp.Body.Close() // Important to close body even for HEAD
 			if resp.StatusCode >= 400 { // Consider HTTP errors as failures too
-				log.Printf("CircuitManager: Instance %d: Latency test to %s (%s) FAILED with status %d", instance.InstanceID, alias, targetURL, resp.StatusCode)
+				slog.Warn("CircuitManager: Latency test FAILED (HTTP status).", "instance_id", instance.InstanceID, "target_alias", alias, "url", targetURL, "status_code", resp.StatusCode)
 				failed = true
 			} else {
-				// log.Printf("CircuitManager: Instance %d: Latency to %s (%s): %v", instance.InstanceID, alias, targetURL, latency.Round(time.Millisecond))
+				slog.Debug("CircuitManager: Latency test success.", "instance_id", instance.InstanceID, "target_alias", alias, "url", targetURL, "latency", latency.Round(time.Millisecond))
 			}
 		}
 		instance.UpdatePerfMetric(alias+"_latency", latency.Milliseconds(), 0, failed)
@@ -379,7 +379,6 @@ func (cm *CircuitManager) performInstanceTests(instance *torinstance.Instance) {
 		startTime := time.Now()
 		req, _ := http.NewRequestWithContext(cm.ctx, http.MethodGet, targetURL, nil)
 		resp, err := httpClient.Do(req)
-		
 		var bytesRead int64 = 0
 		if err == nil {
 			bytesRead, _ = io.Copy(io.Discard, resp.Body) // Read and discard
@@ -390,17 +389,17 @@ func (cm *CircuitManager) performInstanceTests(instance *torinstance.Instance) {
 		failed := false
 		var speedKBps float64 = 0
 		if err != nil {
-			log.Printf("CircuitManager: Instance %d: Speed test to %s FAILED (request error): %v", instance.InstanceID, targetURL, err)
+			slog.Warn("CircuitManager: Speed test FAILED (request error).", "instance_id", instance.InstanceID, "url", targetURL, slog.Any("error", err))
 			failed = true
 		} else if resp.StatusCode >= 400 {
-			log.Printf("CircuitManager: Instance %d: Speed test to %s FAILED with status %d", instance.InstanceID, targetURL, resp.StatusCode)
+			slog.Warn("CircuitManager: Speed test FAILED (HTTP status).", "instance_id", instance.InstanceID, "url", targetURL, "status_code", resp.StatusCode)
 			failed = true
 		} else if duration.Seconds() > 0 && bytesRead > 0 {
 			speedBytesPerSec := float64(bytesRead) / duration.Seconds()
 			speedKBps = speedBytesPerSec / 1024
-			// log.Printf("CircuitManager: Instance %d: Speed test to %s: %.2f KB/s (%d bytes in %v)", instance.InstanceID, targetURL, speedKBps, bytesRead, duration.Round(time.Millisecond))
+			slog.Debug("CircuitManager: Speed test success.", "instance_id", instance.InstanceID, "url", targetURL, "speed_kbps", fmt.Sprintf("%.2f", speedKBps), "bytes_read", bytesRead, "duration", duration.Round(time.Millisecond))
 		} else if bytesRead == 0 && err == nil {
-			log.Printf("CircuitManager: Instance %d: Speed test to %s: 0 bytes read.", instance.InstanceID, targetURL)
+			slog.Warn("CircuitManager: Speed test: 0 bytes read.", "instance_id", instance.InstanceID, "url", targetURL)
 			failed = true // Or handle as very slow / inconclusive
 		}
 		instance.UpdatePerfMetric("default_speed", 0, speedKBps, failed)
@@ -412,27 +411,23 @@ func (cm *CircuitManager) performInstanceTests(instance *torinstance.Instance) {
 func (cm *CircuitManager) fetchAndUpdateInstanceIP(instance *torinstance.Instance) {
 	httpClient := instance.GetHTTPClient()
 	if httpClient == nil {
-		// log.Printf("CircuitManager: Instance %d: HTTP client not available for IP fetch.", instance.InstanceID)
+		slog.Warn("CircuitManager: HTTP client not available for IP fetch.", "instance_id", instance.InstanceID)
 		return
 	}
-	
-	reqCtx, cancel := context.WithTimeout(cm.ctx, cm.appCfg.SocksTimeout*2) // Short timeout for IP check
+	reqCtx, cancel := context.WithTimeout(cm.ctx, cm.appCfg.SocksTimeout*2)
 	defer cancel()
-
 	httpReq, _ := http.NewRequestWithContext(reqCtx, http.MethodGet, cm.appCfg.IPCheckURL, nil)
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		// log.Printf("CircuitManager: Instance %d: Error fetching IP for diversity check: %v", instance.InstanceID, err)
+		slog.Warn("CircuitManager: Error fetching IP for diversity check.", "instance_id", instance.InstanceID, slog.Any("error", err))
 		return
 	}
 	defer resp.Body.Close()
-
 	body, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
-		// log.Printf("CircuitManager: Instance %d: Error reading IP response body: %v", instance.InstanceID, errRead)
+		slog.Warn("CircuitManager: Error reading IP response body for diversity check.", "instance_id", instance.InstanceID, slog.Any("error", errRead))
 		return
 	}
-
 	var ipJsonResponse struct{ IP string `json:"IP"` }
 	if errJson := json.Unmarshal(body, &ipJsonResponse); errJson == nil && ipJsonResponse.IP != "" {
 		instance.SetExternalIP(ipJsonResponse.IP)
@@ -441,7 +436,7 @@ func (cm *CircuitManager) fetchAndUpdateInstanceIP(instance *torinstance.Instanc
 		if net.ParseIP(trimmedBody) != nil {
 			instance.SetExternalIP(trimmedBody)
 		} else {
-			// log.Printf("CircuitManager: Instance %d: IP response not valid JSON or plain IP: %s", instance.InstanceID, string(body))
+			slog.Debug("CircuitManager: IP response not valid JSON or plain IP.", "instance_id", instance.InstanceID, "response_preview", torinstance.firstNChars(trimmedBody, 30))
 		}
 	}
 }

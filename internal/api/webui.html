@@ -238,7 +238,7 @@
             document.getElementById(buttonId).textContent = 'Setting...';
             document.getElementById(buttonId).disabled = true;
 
-            const result = await postData(`/tor${instanceId}/config/nodepolicy`, { policy_type: policyType, nodes: nodes.trim() });
+            const result = await postData(`/api/v1/instance/${instanceId}/config/nodepolicy`, { policy_type: policyType, nodes: nodes.trim() });
             
             document.getElementById(buttonId).textContent = originalButtonText;
             document.getElementById(buttonId).disabled = false;
@@ -337,24 +337,24 @@
         async function refreshInstanceIP(instanceId) {
             const ipElem = document.getElementById(`instance-${instanceId}-ip`);
             if(ipElem) ipElem.textContent = 'Fetching IP...';
-            await fetchData(`/tor${instanceId}/ip`); // This call updates IP on backend
+            await fetchData(`/api/v1/instance/${instanceId}/ip`); // This call updates IP on backend
             fetchInstanceConfig(instanceId); // Then refresh config to get updated IP and LastIPChangeTime
         }
 
         async function fetchInstanceConfig(instanceId) { // Fetches /config
-            const configData = await fetchData(`/tor${instanceId}/config`);
+            const configData = await fetchData(`/api/v1/instance/${instanceId}/config`);
             instancesData[instanceId] = { ...instancesData[instanceId], config: configData };
             updateInstanceCardUI(instanceId, instancesData[instanceId]);
         }
         async function fetchInstanceNodePolicies(instanceId) { // Specifically refreshes node policies from /config
-            const configData = await fetchData(`/tor${instanceId}/config`); // /config now includes live policies
+            const configData = await fetchData(`/api/v1/instance/${instanceId}/config`); // /config now includes live policies
             instancesData[instanceId] = { ...instancesData[instanceId], config: configData };
             updateInstanceCardUI(instanceId, instancesData[instanceId]);
         }
 
 
         async function fetchInstancePerfMetrics(instanceId) { // Fetches /performancemetrics
-            const perfData = await fetchData(`/tor${instanceId}/performancemetrics`);
+            const perfData = await fetchData(`/api/v1/instance/${instanceId}/performancemetrics`);
             instancesData[instanceId] = { ...instancesData[instanceId], perfMetrics: perfData };
             updateInstanceCardUI(instanceId, instancesData[instanceId]);
         }
@@ -365,7 +365,7 @@
             modalTitle.textContent = `Full Stats for Instance ${instanceId}`;
             modalStatsContent.textContent = 'Loading stats...';
             statsModal.style.display = "block";
-            const stats = await fetchData(`/tor${instanceId}/stats`);
+            const stats = await fetchData(`/api/v1/instance/${instanceId}/stats`);
             modalStatsContent.textContent = stats.error ? `Error: ${stats.error}` : JSON.stringify(stats, null, 2);
         }
 
@@ -377,7 +377,7 @@
             const btn = document.getElementById(`rotate-btn-${instanceId}`);
             const spinner = document.getElementById(`rotate-spinner-${instanceId}`);
             btn.disabled = true; spinner.style.display = 'inline-block';
-            const result = await postData(`/tor${instanceId}/rotate`);
+            const result = await postData(`/api/v1/instance/${instanceId}/rotate`);
             btn.disabled = false; spinner.style.display = 'none';
             if (result.error) {
                 alert(`Error for instance ${instanceId}: ${result.error}`);
@@ -455,10 +455,10 @@
             
             // Fetch all data points concurrently
             const dataPromises = [
-                fetchData(`/tor${instanceId}/config`), // Includes basic status, IP, node policies
-                fetchData(`/tor${instanceId}/health`), // Live health check
-                fetchData(`/tor${instanceId}/stats`),  // Tor internal stats
-                fetchData(`/tor${instanceId}/performancemetrics`) // Latency/speed
+                fetchData(`/api/v1/instance/${instanceId}/config`), // Includes basic status, IP, node policies
+                fetchData(`/api/v1/instance/${instanceId}/health`), // Live health check
+                fetchData(`/api/v1/instance/${instanceId}/stats`),  // Tor internal stats
+                fetchData(`/api/v1/instance/${instanceId}/performancemetrics`) // Latency/speed
             ];
 
             try {
@@ -476,7 +476,7 @@
 
         async function fetchAndRenderAllInstances() {
             if (!appDetails) {
-                const details = await fetchData("/app-details");
+                const details = await fetchData("/api/v1/app-details");
                 appDetails = (details.error || !details.num_instances) ? 
                     { num_instances: 0, common_socks_port: 'N/A', common_dns_port: 'N/A', load_balancing_strategy: 'N/A' } : details;
                 renderAppConfigDetails(appDetails);

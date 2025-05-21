@@ -46,7 +46,7 @@ RUN mkdir -p /var/lib/tor /var/run/tor && \
 
 # Expose default ports (can be overridden by docker-compose.yml or -p flag)
 # API port, common SOCKS port, common DNS port (TCP/UDP)
-EXPOSE 8080 9150 53/tcp 53/udp
+EXPOSE 8080 9000 5300/tcp 5300/udp
 
 # Set the entrypoint
 ENTRYPOINT ["/app/entrypoint.sh"]
