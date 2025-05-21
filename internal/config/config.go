@@ -1,21 +1,20 @@
 package config
 
 import (
-	"log" // Will be replaced by slog, but kept for initial Getenv... functions if they log errors
+	"log"
 	"os"
 	"strconv"
-	"strings"
+	"strings" // Added for TrimSpace
 	"sync"
 	"time"
-	"log/slog" // Import slog
 )
 
 const (
 	DefaultTorAuthCookiePath = "/var/lib/tor/control_auth_cookie"
-	DefaultIPCheckURL        = "https://check.torproject.org/api/ip" 
+	DefaultIPCheckURL        = "https://check.torproject.org/api/ip"
 	DefaultHealthCheckInterval = 30 * time.Second
 	DefaultSocksTimeout      = 10 * time.Second
-	DefaultRotationStaggerDelay = 10 * time.Second 
+	DefaultRotationStaggerDelay = 10 * time.Second
 	DefaultAPIPort           = "8080"
 	DefaultCommonSocksPort   = "9000"
 	DefaultCommonDNSPort     = "5300"
@@ -24,24 +23,14 @@ const (
 	DefaultDNSBasePort       = 9200
 	DefaultNumTorInstances   = 1
 
+	// Defaults for IP Diversity feature
 	DefaultIPDiversityCheckInterval        = 5 * time.Minute
 	DefaultIPDiversityRotationCooldown     = 15 * time.Minute
 	DefaultMinInstancesForIPDiversityCheck = 2
 
-	DefaultAutoRotateCircuitIntervalSeconds = 3600 
-	DefaultAutoRotateStaggerDelaySeconds    = 30   
-
-	DefaultLoadBalancingStrategy = "random" 
-
-	DefaultPerfTestInterval         = 5 * time.Minute 
-	DefaultLatencyTestTargetGoogle  = "https://www.google.com/generate_204"
-	DefaultLatencyTestTargetCloudflare = "https://1.1.1.1/cdn-cgi/trace" 
-	DefaultSpeedTestTargetCloudflareBytes = 1000000 
-	DefaultSpeedTestTargetCloudflareURL = "https://speed.cloudflare.com/__down?bytes=" 
-
-	// Logging Defaults
-	DefaultLogLevel = "info" // Options: debug, info, warn, error
-	DefaultLogFormat = "text" // Options: text, json
+	// New defaults for Automatic Circuit Rotation
+	DefaultAutoRotateCircuitIntervalSeconds = 3600 // 1 hour
+	DefaultAutoRotateStaggerDelaySeconds    = 30   // 30 seconds
 )
 
 // AppConfig holds the global configuration for the torgo application.
@@ -53,194 +42,164 @@ type AppConfig struct {
 	CommonSocksPort     string
 	CommonDNSPort       string
 	APIPort             string
-	RotationStaggerDelay time.Duration 
+	RotationStaggerDelay time.Duration
 	HealthCheckInterval time.Duration
-	IPCheckURL          string 
+	IPCheckURL          string
 	SocksTimeout        time.Duration
 
-	IsGlobalRotationActive int32 
+	IsGlobalRotationActive int32
 
-	CircuitManagerEnabled             bool
-	CircuitMaxAge                     time.Duration 
-	CircuitRotationStagger            time.Duration 
-	IPDiversityCheckEnabled           bool          
-	IPDiversityMinInstances           int           
-	IPDiversitySubnetCheckInterval    time.Duration 
-	IPDiversityRotationCooldown       time.Duration 
+	IPDiversityCheckInterval        time.Duration
+	IPDiversityRotationCooldown     time.Duration
+	MinInstancesForIPDiversityCheck int
 
-	LoadBalancingStrategy string
-
-	PerfTestEnabled                 bool
-	PerfTestInterval                time.Duration
-	LatencyTestTargets              map[string]string 
-	SpeedTestTargetURL              string            
-	SpeedTestTargetBytes            int               
-
-	// Logging Configuration
-	LogLevel slog.Level // Changed from string to slog.Level
-	LogFormat string
+	AutoRotateCircuitInterval time.Duration
+	AutoRotateStaggerDelay    time.Duration
+	IsAutoRotationEnabled     bool
 }
 
 var GlobalConfig *AppConfig
 var once sync.Once
 
-// GetenvDuration parses an environment variable as seconds into a time.Duration.
-func GetenvDuration(key string, defaultValue time.Duration) time.Duration {
-	valStr := os.Getenv(key)
-	if valStr == "" {
-		return defaultValue
-	}
-	valInt, err := strconv.Atoi(valStr)
-	if err != nil || valInt < 0 { 
-		// Use standard log here as slog might not be configured yet during initial config load
-		log.Printf("Config (GetenvDuration): Invalid duration value for %s: '%s'. Using default: %v", key, valStr, defaultValue)
-		return defaultValue
-	}
-	return time.Duration(valInt) * time.Second
-}
-
-// GetenvInt parses an environment variable as an integer.
-func GetenvInt(key string, defaultValue int) int {
-	valStr := os.Getenv(key)
-	if valStr == "" {
-		return defaultValue
-	}
-	valInt, err := strconv.Atoi(valStr)
-	if err != nil {
-		log.Printf("Config (GetenvInt): Invalid integer value for %s: '%s'. Using default: %d", key, valStr, defaultValue)
-		return defaultValue
-	}
-	return valInt
-}
-
-// GetenvBool parses an environment variable as a boolean.
-func GetenvBool(key string, defaultValue bool) bool {
-	valStr := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	if valStr == "" {
-		return defaultValue
-	}
-	switch valStr {
-	case "true", "1", "yes":
-		return true
-	case "false", "0", "no":
-		return false
-	default:
-		log.Printf("Config (GetenvBool): Invalid boolean value for %s: '%s'. Using default: %t", key, valStr, defaultValue)
-		return defaultValue
-	}
-}
-
-
 func LoadConfig() *AppConfig {
 	once.Do(func() {
-		// Temporary logger for config loading issues before slog is fully set up.
-		// This uses the standard log package.
-		initialLog := log.New(os.Stderr, "CONFIG_LOADER: ", log.LstdFlags|log.Lshortfile)
-		initialLog.Println("Loading application configuration...")
-		
+		log.Println("Loading application configuration...")
 		cfg := &AppConfig{}
 
-		cfg.NumTorInstances = GetenvInt("TOR_INSTANCES_CONFIGURED", DefaultNumTorInstances)
-		if cfg.NumTorInstances < 1 {
-			initialLog.Printf("Warning: TOR_INSTANCES_CONFIGURED is %d, must be at least 1. Setting to 1.", cfg.NumTorInstances)
-			cfg.NumTorInstances = 1
+		nInstancesStr := os.Getenv("TOR_INSTANCES_CONFIGURED")
+		n, err := strconv.Atoi(nInstancesStr)
+		if err != nil || n < 1 {
+			log.Printf("Invalid or missing TOR_INSTANCES_CONFIGURED: '%s'. Defaulting to %d.", nInstancesStr, DefaultNumTorInstances)
+			cfg.NumTorInstances = DefaultNumTorInstances
+		} else {
+			cfg.NumTorInstances = n
 		}
 
-		cfg.SocksBasePort = GetenvInt("SOCKS_BASE_PORT_CONFIGURED", DefaultSocksBasePort)
-		cfg.ControlBasePort = GetenvInt("CONTROL_BASE_PORT_CONFIGURED", DefaultControlBasePort)
-		cfg.DNSBasePort = GetenvInt("DNS_BASE_PORT_CONFIGURED", DefaultDNSBasePort)
+		sBasePortStr := os.Getenv("SOCKS_BASE_PORT_CONFIGURED")
+		cfg.SocksBasePort, err = strconv.Atoi(sBasePortStr)
+		if err != nil || cfg.SocksBasePort == 0 {
+			cfg.SocksBasePort = DefaultSocksBasePort
+		}
+
+		cBasePortStr := os.Getenv("CONTROL_BASE_PORT_CONFIGURED")
+		cfg.ControlBasePort, err = strconv.Atoi(cBasePortStr)
+		if err != nil || cfg.ControlBasePort == 0 {
+			cfg.ControlBasePort = DefaultControlBasePort
+		}
+
+		dBasePortStr := os.Getenv("DNS_BASE_PORT_CONFIGURED")
+		cfg.DNSBasePort, err = strconv.Atoi(dBasePortStr)
+		if err != nil || cfg.DNSBasePort == 0 {
+			cfg.DNSBasePort = DefaultDNSBasePort
+		}
 
 		cfg.CommonSocksPort = os.Getenv("COMMON_SOCKS_PROXY_PORT")
-		if cfg.CommonSocksPort == "" {	cfg.CommonSocksPort = DefaultCommonSocksPort }
+		if cfg.CommonSocksPort == "" {
+			cfg.CommonSocksPort = DefaultCommonSocksPort
+		}
+
 		cfg.CommonDNSPort = os.Getenv("COMMON_DNS_PROXY_PORT")
-		if cfg.CommonDNSPort == "" { cfg.CommonDNSPort = DefaultCommonDNSPort }
+		if cfg.CommonDNSPort == "" {
+			cfg.CommonDNSPort = DefaultCommonDNSPort
+		}
+
 		cfg.APIPort = os.Getenv("API_PORT")
-		if cfg.APIPort == "" { cfg.APIPort = DefaultAPIPort }
+		if cfg.APIPort == "" {
+			cfg.APIPort = DefaultAPIPort
+		}
 
-		cfg.RotationStaggerDelay = GetenvDuration("ROTATION_STAGGER_DELAY_SECONDS", DefaultRotationStaggerDelay)
-		cfg.HealthCheckInterval = GetenvDuration("HEALTH_CHECK_INTERVAL_SECONDS", DefaultHealthCheckInterval)
-		cfg.SocksTimeout = GetenvDuration("SOCKS_TIMEOUT_SECONDS", DefaultSocksTimeout)
-		
-		cfg.IPCheckURL = os.Getenv("IP_CHECK_URL")
-		if cfg.IPCheckURL == "" { cfg.IPCheckURL = DefaultIPCheckURL }
-
-		cfg.CircuitManagerEnabled = GetenvBool("CIRCUIT_MANAGER_ENABLED", true)
-		maxAgeSec := GetenvInt("CIRCUIT_MAX_AGE_SECONDS", DefaultAutoRotateCircuitIntervalSeconds)
-		if maxAgeSec > 0 {
-			cfg.CircuitMaxAge = time.Duration(maxAgeSec) * time.Second
+		delayStr := os.Getenv("ROTATION_STAGGER_DELAY_SECONDS")
+		if delaySec, err := strconv.Atoi(delayStr); err == nil && delaySec > 0 {
+			cfg.RotationStaggerDelay = time.Duration(delaySec) * time.Second
 		} else {
-			cfg.CircuitMaxAge = 0 
+			cfg.RotationStaggerDelay = DefaultRotationStaggerDelay
 		}
-		cfg.CircuitRotationStagger = GetenvDuration("CIRCUIT_ROTATION_STAGGER_SECONDS", time.Duration(DefaultAutoRotateStaggerDelaySeconds)*time.Second)
-		cfg.IPDiversityCheckEnabled = GetenvBool("IP_DIVERSITY_ENABLED", true)
-		cfg.IPDiversityMinInstances = GetenvInt("IP_DIVERSITY_MIN_INSTANCES", DefaultMinInstancesForIPDiversityCheck)
-		cfg.IPDiversitySubnetCheckInterval = GetenvDuration("IP_DIVERSITY_SUBNET_CHECK_INTERVAL_SECONDS", DefaultIPDiversityCheckInterval)
-		cfg.IPDiversityRotationCooldown = GetenvDuration("IP_DIVERSITY_ROTATION_COOLDOWN_SECONDS", DefaultIPDiversityRotationCooldown)
 
-		lbStrategy := strings.ToLower(strings.TrimSpace(os.Getenv("LOAD_BALANCING_STRATEGY")))
-		switch lbStrategy {
-		case "random", "round-robin", "least-connections-proxy":
-			cfg.LoadBalancingStrategy = lbStrategy
-		default:
-			if lbStrategy != "" {
-				initialLog.Printf("Invalid LOAD_BALANCING_STRATEGY: '%s'. Defaulting to '%s'.", lbStrategy, DefaultLoadBalancingStrategy)
+		healthIntervalStr := os.Getenv("HEALTH_CHECK_INTERVAL_SECONDS")
+		if healthSec, err := strconv.Atoi(healthIntervalStr); err == nil && healthSec > 0 {
+			cfg.HealthCheckInterval = time.Duration(healthSec) * time.Second
+		} else {
+			cfg.HealthCheckInterval = DefaultHealthCheckInterval
+		}
+
+		cfg.IPCheckURL = os.Getenv("IP_CHECK_URL")
+		if cfg.IPCheckURL == "" {
+			cfg.IPCheckURL = DefaultIPCheckURL
+		}
+
+		socksTimeoutStr := os.Getenv("SOCKS_TIMEOUT_SECONDS")
+		if socksTimeoutSec, err := strconv.Atoi(socksTimeoutStr); err == nil && socksTimeoutSec > 0 {
+			cfg.SocksTimeout = time.Duration(socksTimeoutSec) * time.Second
+		} else {
+			cfg.SocksTimeout = DefaultSocksTimeout
+		}
+
+		ipDiversityIntervalStr := os.Getenv("IP_DIVERSITY_CHECK_INTERVAL_SECONDS")
+		if ipDiversitySec, err := strconv.Atoi(ipDiversityIntervalStr); err == nil && ipDiversitySec > 0 {
+			cfg.IPDiversityCheckInterval = time.Duration(ipDiversitySec) * time.Second
+		} else {
+			cfg.IPDiversityCheckInterval = DefaultIPDiversityCheckInterval
+		}
+
+		ipDiversityCooldownStr := os.Getenv("IP_DIVERSITY_ROTATION_COOLDOWN_SECONDS")
+		if ipDiversityCooldownSec, err := strconv.Atoi(ipDiversityCooldownStr); err == nil && ipDiversityCooldownSec > 0 {
+			cfg.IPDiversityRotationCooldown = time.Duration(ipDiversityCooldownSec) * time.Second
+		} else {
+			cfg.IPDiversityRotationCooldown = DefaultIPDiversityRotationCooldown
+		}
+
+		minInstancesStr := os.Getenv("MIN_INSTANCES_FOR_IP_DIVERSITY_CHECK")
+		if minInst, err := strconv.Atoi(minInstancesStr); err == nil && minInst >= 0 {
+			cfg.MinInstancesForIPDiversityCheck = minInst
+		} else {
+			cfg.MinInstancesForIPDiversityCheck = DefaultMinInstancesForIPDiversityCheck
+		}
+
+		// --- Automatic Circuit Rotation Config ---
+		rawAutoRotateIntervalStr := os.Getenv("AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS")
+		trimmedAutoRotateIntervalStr := strings.TrimSpace(rawAutoRotateIntervalStr)
+		log.Printf("Config: Raw AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS: '%s', Trimmed: '%s'", rawAutoRotateIntervalStr, trimmedAutoRotateIntervalStr)
+
+		if trimmedAutoRotateIntervalStr == "0" {
+			cfg.IsAutoRotationEnabled = false
+			cfg.AutoRotateCircuitInterval = 0
+			log.Println("Config: Automatic circuit rotation is EXPLICITLY DISABLED via AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS=0.")
+		} else {
+			autoRotateSec, err := strconv.Atoi(trimmedAutoRotateIntervalStr)
+			if err == nil && autoRotateSec > 0 {
+				cfg.AutoRotateCircuitInterval = time.Duration(autoRotateSec) * time.Second
+				cfg.IsAutoRotationEnabled = true
+				log.Printf("Config: Automatic circuit rotation ENABLED. Interval set to %v from ENV.", cfg.AutoRotateCircuitInterval)
+			} else {
+				// Not "0" and not a valid positive integer. Default to enabled with default interval.
+				cfg.AutoRotateCircuitInterval = time.Duration(DefaultAutoRotateCircuitIntervalSeconds) * time.Second
+				cfg.IsAutoRotationEnabled = true // Default to enabled if not explicitly "0"
+				if trimmedAutoRotateIntervalStr == "" {
+					log.Printf("Config: AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS not set. Defaulting to ENABLED with interval %v.", cfg.AutoRotateCircuitInterval)
+				} else {
+					log.Printf("Config: Invalid AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS ('%s'). Error: %v. Defaulting to ENABLED with interval %v.", trimmedAutoRotateIntervalStr, err, cfg.AutoRotateCircuitInterval)
+				}
 			}
-			cfg.LoadBalancingStrategy = DefaultLoadBalancingStrategy
 		}
 
-		cfg.PerfTestEnabled = GetenvBool("PERF_TEST_ENABLED", true)
-		cfg.PerfTestInterval = GetenvDuration("PERF_TEST_INTERVAL_SECONDS", DefaultPerfTestInterval)
-		cfg.LatencyTestTargets = make(map[string]string)
-		cfg.LatencyTestTargets["google"] = os.Getenv("LATENCY_TARGET_GOOGLE_URL")
-		if cfg.LatencyTestTargets["google"] == "" { cfg.LatencyTestTargets["google"] = DefaultLatencyTestTargetGoogle }
-		cfg.LatencyTestTargets["cloudflare"] = os.Getenv("LATENCY_TARGET_CLOUDFLARE_URL")
-		if cfg.LatencyTestTargets["cloudflare"] == "" { cfg.LatencyTestTargets["cloudflare"] = DefaultLatencyTestTargetCloudflare }
-		cfg.SpeedTestTargetURL = os.Getenv("SPEED_TEST_TARGET_URL")
-		if cfg.SpeedTestTargetURL == "" { cfg.SpeedTestTargetURL = DefaultSpeedTestTargetCloudflareURL }
-		cfg.SpeedTestTargetBytes = GetenvInt("SPEED_TEST_TARGET_BYTES", DefaultSpeedTestTargetCloudflareBytes)
-
-		// Logging Configuration
-		logLevelStr := strings.ToLower(os.Getenv("LOG_LEVEL"))
-		if logLevelStr == "" { logLevelStr = DefaultLogLevel }
-		switch logLevelStr {
-		case "debug":
-			cfg.LogLevel = slog.LevelDebug
-		case "info":
-			cfg.LogLevel = slog.LevelInfo
-		case "warn":
-			cfg.LogLevel = slog.LevelWarn
-		case "error":
-			cfg.LogLevel = slog.LevelError
-		default:
-			initialLog.Printf("Invalid LOG_LEVEL: '%s'. Defaulting to '%s'.", logLevelStr, DefaultLogLevel)
-			cfg.LogLevel = slog.LevelInfo // Default to Info if invalid
+		autoRotateStaggerStr := os.Getenv("AUTO_ROTATE_STAGGER_DELAY_SECONDS")
+		if autoRotateStaggerSec, err := strconv.Atoi(autoRotateStaggerStr); err == nil && autoRotateStaggerSec > 0 {
+			cfg.AutoRotateStaggerDelay = time.Duration(autoRotateStaggerSec) * time.Second
+		} else {
+			cfg.AutoRotateStaggerDelay = time.Duration(DefaultAutoRotateStaggerDelaySeconds) * time.Second
 		}
-
-		cfg.LogFormat = strings.ToLower(os.Getenv("LOG_FORMAT"))
-		if cfg.LogFormat == "" {
-			cfg.LogFormat = DefaultLogFormat
-		}
-		if cfg.LogFormat != "text" && cfg.LogFormat != "json" {
-			initialLog.Printf("Invalid LOG_FORMAT: '%s'. Defaulting to '%s'.", cfg.LogFormat, DefaultLogFormat)
-			cfg.LogFormat = DefaultLogFormat
-		}
+		// --- End Automatic Circuit Rotation Config ---
 
 		GlobalConfig = cfg
-		// After this point, the main application can set up slog with cfg.LogLevel and cfg.LogFormat.
-		// The initialLog can be replaced by slog.
-		initialLog.Printf("Base configuration loaded: NumInstances=%d, APIPort=%s, LB Strategy=%s, LogLevel=%s, LogFormat=%s",
-			cfg.NumTorInstances, cfg.APIPort, cfg.LoadBalancingStrategy, cfg.LogLevel.String(), cfg.LogFormat)
-		if cfg.CircuitManagerEnabled {
-			initialLog.Printf("CircuitManager: ENABLED. MaxAge=%v, IPDiversityChecks=%t (MinInst:%d, Interval:%v, Cooldown:%v), Stagger=%v",
-				cfg.CircuitMaxAge, cfg.IPDiversityCheckEnabled, cfg.IPDiversityMinInstances, cfg.IPDiversitySubnetCheckInterval, cfg.IPDiversityRotationCooldown, cfg.CircuitRotationStagger)
+		log.Printf("Configuration loaded: NumInstances=%d, APIPort=%s, CommonSOCKS=%s, CommonDNS=%s",
+			cfg.NumTorInstances, cfg.APIPort, cfg.CommonSocksPort, cfg.CommonDNSPort)
+		log.Printf("IP Diversity: CheckInterval=%v, Cooldown=%v, MinInstances=%d",
+			cfg.IPDiversityCheckInterval, cfg.IPDiversityRotationCooldown, cfg.MinInstancesForIPDiversityCheck)
+		if cfg.IsAutoRotationEnabled {
+			log.Printf("Auto Circuit Rotation: Final Status: ENABLED, Interval=%v, StaggerDelay=%v",
+				cfg.AutoRotateCircuitInterval, cfg.AutoRotateStaggerDelay)
 		} else {
-			initialLog.Println("CircuitManager: DISABLED.")
-		}
-		if cfg.PerfTestEnabled {
-			initialLog.Printf("PerfTester: ENABLED. Interval=%v. Latency Targets: %d, Speed Target: %s (%d bytes)",
-			cfg.PerfTestInterval, len(cfg.LatencyTestTargets), cfg.SpeedTestTargetURL, cfg.SpeedTestTargetBytes)
-		} else {
-			initialLog.Println("PerfTester: DISABLED.")
+			log.Println("Auto Circuit Rotation: Final Status: DISABLED.")
 		}
 	})
 	return GlobalConfig

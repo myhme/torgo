@@ -1,55 +1,62 @@
-# Stage 1: Build the Go application
+# ---- Build Stage ----
 FROM golang:1.24-alpine AS builder
-
 WORKDIR /app
 
-# Copy go.mod and go.sum first to leverage Docker cache
-COPY go.mod go.sum ./
-RUN go mod download
-RUN go mod verify
+# Install git for fetching Go modules if they are not vendored.
+RUN apk add --no-cache git
 
-# Copy the rest of the application source code
+# Copy module files first to leverage Docker cache
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+
+# Copy the entire application source code
+# This includes cmd/ and internal/
 COPY . .
 
-# Build the application
-# CGO_ENABLED=0 for a statically linked binary (good for Alpine)
-# -ldflags="-s -w" to strip debug symbols and reduce binary size
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-s -w" -o torgo-app ./cmd/torgo
+# Build the application from the cmd directory
+RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-w -s" -installsuffix cgo -o /torgo-app ./cmd/torgo
 
-# Stage 2: Create the final lightweight image
-FROM alpine:latest
-
-# Install Tor and su-exec (similar to gosu, for running Tor as non-root)
-# ca-certificates is needed for HTTPS calls (e.g., IP checks, performance tests)
-RUN apk add --no-cache tor su-exec ca-certificates tzdata
-
-# Create a non-root user for Tor
-# _tor is a common convention for the Tor user
-RUN addgroup -S _tor && adduser -S -G _tor -h /var/lib/tor _tor
+# ---- Runtime Stage ----
+FROM alpine:3.21
+# Install Tor, su-exec, ca-certificates, coreutils, and curl (for healthcheck)
+RUN apk add --no-cache tor su-exec ca-certificates coreutils curl procps # procps for sysctl
 
 WORKDIR /app
-
-# Copy the torrc template and entrypoint script
-COPY torrc.template /etc/tor/torrc.template
-COPY entrypoint.sh /app/entrypoint.sh
-COPY docker-healthcheck.sh /app/docker-healthcheck.sh
-RUN chmod +x /app/entrypoint.sh /app/docker-healthcheck.sh
-
 # Copy the built application from the builder stage
-COPY --from=builder /app/torgo-app /app/torgo-app
+COPY --from=builder /torgo-app /app/torgo-app
 
-# Ensure Tor data directories are writable by the _tor user
-# The entrypoint script will also handle permissions for instance-specific data dirs
-RUN mkdir -p /var/lib/tor /var/run/tor && \
-    chown -R _tor:_tor /var/lib/tor /var/run/tor && \
-    chmod -R 700 /var/lib/tor /var/run/tor
+COPY torrc.template /etc/tor/torrc.template
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Expose default ports (can be overridden by docker-compose.yml or -p flag)
-# API port, common SOCKS port, common DNS port (TCP/UDP)
-EXPOSE 8080 9000 5300/tcp 5300/udp
+# Copy the healthcheck script
+COPY docker-healthcheck.sh /usr/local/bin/docker-healthcheck.sh
+RUN chmod +x /usr/local/bin/docker-healthcheck.sh
 
-# Set the entrypoint
-ENTRYPOINT ["/app/entrypoint.sh"]
+# Create base directories.
+RUN mkdir -p /var/lib/tor
+RUN mkdir -p /var/run/tor
 
-# Default command (not strictly necessary if entrypoint handles everything)
-# CMD ["/app/torgo-app"]
+# Disable IPv6 at the container level
+RUN echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf && \
+    echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.conf && \
+    echo "net.ipv6.conf.lo.disable_ipv6 = 1" >> /etc/sysctl.conf
+# Note: Applying sysctl settings usually requires either a reboot or `sysctl -p`.
+# In Docker, these settings might be applied when the container starts if the entrypoint allows,
+# or they might require the container to be run with --privileged or specific sysctl capabilities
+# depending on the Docker host and version. For a non-privileged container, this sets the stage.
+# The entrypoint.sh could also attempt `sysctl -p` if needed, but that requires root.
+
+# Expose the Go API port and the new common SOCKS/DNS proxy ports
+EXPOSE 8080 
+# Go management API (configurable via API_PORT)
+EXPOSE 9000 
+# Common SOCKS proxy port (configurable via COMMON_SOCKS_PROXY_PORT)
+EXPOSE 5300 
+# Common DNS proxy port (UDP/TCP) (configurable via COMMON_DNS_PROXY_PORT)
+
+# Docker Healthcheck
+HEALTHCHECK --interval=60s --timeout=15s --retries=3 --start-period=2m \
+  CMD /usr/local/bin/docker-healthcheck.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

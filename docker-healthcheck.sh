@@ -13,7 +13,7 @@ PROXY_ADDRESS="127.0.0.1:${COMMON_SOCKS_PORT}"
 IP_CHECK_URL=${IP_CHECK_URL:-https://check.torproject.org/api/ip} # Default IP check URL
 
 # Timeout for the curl command (in seconds)
-CURL_TIMEOUT=15 # Slightly increased timeout for health check reliability
+CURL_TIMEOUT=10
 
 # Attempt to make a request through the common SOCKS5 proxy
 # -s: silent
@@ -23,18 +23,10 @@ CURL_TIMEOUT=15 # Slightly increased timeout for health check reliability
 # --max-time: Max total time for operation
 echo "Health check: Attempting to connect to ${IP_CHECK_URL} via SOCKS5 proxy ${PROXY_ADDRESS}..."
 
-# Use a temporary file for curl output to check its content
-TMP_OUTPUT=$(mktemp)
-trap 'rm -f "$TMP_OUTPUT"' EXIT # Ensure temp file is cleaned up
-
-# Perform the curl command, saving output and capturing HTTP status code
-HTTP_STATUS=$(curl -w "%{http_code}" -sf --socks5-hostname "${PROXY_ADDRESS}" --connect-timeout "${CURL_TIMEOUT}" --max-time "${CURL_TIMEOUT}" "${IP_CHECK_URL}" -o "$TMP_OUTPUT")
-
-if [ "$HTTP_STATUS" -eq 200 ] && grep -q '"IsTor":true' "$TMP_OUTPUT"; then
-  echo "Health check: PASSED - Successfully connected via Tor (HTTP 200) and response indicates Tor usage."
+if curl -sf --socks5-hostname "${PROXY_ADDRESS}" --connect-timeout "${CURL_TIMEOUT}" --max-time "${CURL_TIMEOUT}" "${IP_CHECK_URL}" | grep -q '"IsTor":true'; then
+  echo "Health check: PASSED - Successfully connected via Tor and response indicates Tor usage."
   exit 0 # Healthy
 else
-  echo "Health check: FAILED - Condition not met. HTTP Status: ${HTTP_STATUS}."
-  echo "Response (first 100 chars): $(head -c 100 "$TMP_OUTPUT")"
+  echo "Health check: FAILED - Could not connect via Tor or response did not indicate Tor usage."
   exit 1 # Unhealthy
 fi

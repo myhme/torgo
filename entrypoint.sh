@@ -3,14 +3,14 @@ set -e
 
 SOCKS_BASE_PORT_DEFAULT=9050
 CONTROL_BASE_PORT_DEFAULT=9160
-DNS_BASE_PORT_DEFAULT=9200 
+DNS_BASE_PORT_DEFAULT=9200
 
 TOR_USER="_tor" 
 TOR_GROUP="_tor"
 TOR_DATA_BASE_DIR="/var/lib/tor" 
 TOR_RUN_DIR="/var/run/tor"       
-TORRC_TEMPLATE="/etc/tor/torrc.template" 
-TORRC_DIR="/etc/tor" 
+TORRC_TEMPLATE="/etc/tor/torrc.template"
+TORRC_DIR="/etc/tor"
 
 if ! getent group "$TOR_GROUP" >/dev/null 2>&1; then
     echo "Group $TOR_GROUP does not exist. Creating..."
@@ -31,14 +31,14 @@ if ! [[ "$N_INSTANCES" =~ ^[0-9]+$ ]] || [ "$N_INSTANCES" -lt 1 ]; then
     echo "Warning: Invalid TOR_INSTANCES value: '$N_INSTANCES'. Defaulting to 1."
     N_INSTANCES=1
 fi
-export TOR_INSTANCES_CONFIGURED="$N_INSTANCES" 
+export TOR_INSTANCES_CONFIGURED="$N_INSTANCES"
 
 SOCKS_BASE_PORT=${SOCKS_BASE_PORT_CONFIGURED:-$SOCKS_BASE_PORT_DEFAULT}
 CONTROL_BASE_PORT=${CONTROL_BASE_PORT_CONFIGURED:-$CONTROL_BASE_PORT_DEFAULT}
 DNS_BASE_PORT=${DNS_BASE_PORT_CONFIGURED:-$DNS_BASE_PORT_DEFAULT}
-export SOCKS_BASE_PORT_CONFIGURED="$SOCKS_BASE_PORT"    
-export CONTROL_BASE_PORT_CONFIGURED="$CONTROL_BASE_PORT" 
-export DNS_BASE_PORT_CONFIGURED="$DNS_BASE_PORT"      
+export SOCKS_BASE_PORT_CONFIGURED="$SOCKS_BASE_PORT"
+export CONTROL_BASE_PORT_CONFIGURED="$CONTROL_BASE_PORT"
+export DNS_BASE_PORT_CONFIGURED="$DNS_BASE_PORT"
 
 
 echo "Starting $N_INSTANCES Tor instance(s)..."
@@ -68,9 +68,9 @@ for i in $(seq 1 "$N_INSTANCES"); do
 
     echo "Setting up Tor instance $i:"
     echo "  DataDir: $DATA_DIR"
-    echo "  SocksPort: 127.0.0.1:$CURRENT_SOCKS_PORT" 
-    echo "  ControlPort: 127.0.0.1:$CURRENT_CONTROL_PORT" 
-    echo "  DNSPort: 127.0.0.1:$CURRENT_DNS_PORT" 
+    echo "  SocksPort: $CURRENT_SOCKS_PORT"
+    echo "  ControlPort: $CURRENT_CONTROL_PORT"
+    echo "  DNSPort: $CURRENT_DNS_PORT"
     echo "  Torrc: $TORRC_FILE"
     echo "  PID File: $PID_FILE"
 
@@ -80,9 +80,9 @@ for i in $(seq 1 "$N_INSTANCES"); do
     chmod 700 "$DATA_DIR"
 
     sed -e "s|__DATADIR__|${DATA_DIR}|g" \
-        -e "s|__SOCKSPORT__|127.0.0.1:${CURRENT_SOCKS_PORT}|g" \
-        -e "s|__CONTROLPORT__|127.0.0.1:${CURRENT_CONTROL_PORT}|g" \
-        -e "s|__DNSPORT__|127.0.0.1:${CURRENT_DNS_PORT}|g" \
+        -e "s|__SOCKSPORT__|${CURRENT_SOCKS_PORT}|g" \
+        -e "s|__CONTROLPORT__|${CURRENT_CONTROL_PORT}|g" \
+        -e "s|__DNSPORT__|${CURRENT_DNS_PORT}|g" \
         -e "s|__PIDFILE__|${PID_FILE}|g" \
         "$TORRC_TEMPLATE" > "$TORRC_FILE"
 
@@ -100,14 +100,14 @@ done
 echo "Waiting for all Tor instances to initialize and create control cookies..."
 ALL_COOKIES_READY=0
 WAIT_ATTEMPTS=0
-MAX_WAIT_ATTEMPTS=90 
+MAX_WAIT_ATTEMPTS=60 
 
 while [ "$ALL_COOKIES_READY" -eq 0 ] && [ "$WAIT_ATTEMPTS" -lt "$MAX_WAIT_ATTEMPTS" ]; do
     ALL_COOKIES_READY=1 
     for i in $(seq 1 "$N_INSTANCES"); do
         COOKIE_PATH="${TOR_DATA_BASE_DIR}/instance${i}/control_auth_cookie"
         if [ ! -f "$COOKIE_PATH" ]; then
-            ALL_COOKIES_READY=0 
+            ALL_COOKIES_READY=0
             break 
         fi
     done
@@ -116,7 +116,7 @@ while [ "$ALL_COOKIES_READY" -eq 0 ] && [ "$WAIT_ATTEMPTS" -lt "$MAX_WAIT_ATTEMP
         sleep 1
         WAIT_ATTEMPTS=$((WAIT_ATTEMPTS + 1))
         if [ $((WAIT_ATTEMPTS % 5)) -eq 0 ]; then 
-             echo "Still waiting for some Tor control cookies... ($WAIT_ATTEMPTS/$MAX_WAIT_ATTEMPTS seconds)"
+             echo "Still waiting for some Tor control cookies... ($WAIT_ATTEMPTS/$MAX_WAIT_ATTEMPTS)"
         fi
     fi
 done
@@ -137,25 +137,15 @@ echo "All Tor control cookies found. Starting Go 'torgo' application..."
 export COMMON_SOCKS_PROXY_PORT="${COMMON_SOCKS_PROXY_PORT:-9000}"
 export COMMON_DNS_PROXY_PORT="${COMMON_DNS_PROXY_PORT:-5300}"
 export API_PORT="${API_PORT:-8080}"
-export ROTATION_STAGGER_DELAY_SECONDS="${ROTATION_STAGGER_DELAY_SECONDS:-15}"
-export HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-45}"
+export ROTATION_STAGGER_DELAY_SECONDS="${ROTATION_STAGGER_DELAY_SECONDS:-10}"
+export HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-30}"
 export IP_CHECK_URL="${IP_CHECK_URL:-https://check.torproject.org/api/ip}"
-export SOCKS_TIMEOUT_SECONDS="${SOCKS_TIMEOUT_SECONDS:-15}"
-export LOAD_BALANCING_STRATEGY="${LOAD_BALANCING_STRATEGY:-random}"
+export SOCKS_TIMEOUT_SECONDS="${SOCKS_TIMEOUT_SECONDS:-10}"
 
-export CIRCUIT_MANAGER_ENABLED="${CIRCUIT_MANAGER_ENABLED:-true}"
-export CIRCUIT_MAX_AGE_SECONDS="${CIRCUIT_MAX_AGE_SECONDS:-3600}"
-export CIRCUIT_ROTATION_STAGGER_SECONDS="${CIRCUIT_ROTATION_STAGGER_SECONDS:-30}"
-export IP_DIVERSITY_ENABLED="${IP_DIVERSITY_ENABLED:-true}"
-export IP_DIVERSITY_MIN_INSTANCES="${IP_DIVERSITY_MIN_INSTANCES:-2}"
-export IP_DIVERSITY_SUBNET_CHECK_INTERVAL_SECONDS="${IP_DIVERSITY_SUBNET_CHECK_INTERVAL_SECONDS:-300}"
+# New ENVs for IP Diversity, ensure they are passed to Go app
+export IP_DIVERSITY_CHECK_INTERVAL_SECONDS="${IP_DIVERSITY_CHECK_INTERVAL_SECONDS:-300}"
 export IP_DIVERSITY_ROTATION_COOLDOWN_SECONDS="${IP_DIVERSITY_ROTATION_COOLDOWN_SECONDS:-900}"
+export MIN_INSTANCES_FOR_IP_DIVERSITY_CHECK="${MIN_INSTANCES_FOR_IP_DIVERSITY_CHECK:-2}"
 
-export PERF_TEST_ENABLED="${PERF_TEST_ENABLED:-true}"
-export PERF_TEST_INTERVAL_SECONDS="${PERF_TEST_INTERVAL_SECONDS:-300}"
-
-# Logging ENVs for slog
-export LOG_LEVEL="${LOG_LEVEL:-info}"
-export LOG_FORMAT="${LOG_FORMAT:-text}"
 
 /app/torgo-app
