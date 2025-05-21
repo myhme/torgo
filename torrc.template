@@ -8,8 +8,8 @@ ControlPort __CONTROLPORT__
 DNSPort __DNSPORT__
 
 ## Common settings for all instances
-Log notice stdout
-Log notice file /var/log/tor/instance.log # Consider if file logging is needed per instance or just stdout
+#Log notice stdout
+#Log notice file /var/log/tor/instance.log # Consider if file logging is needed per instance or just stdout
 RunAsDaemon 0 # Important for Docker, torgo manages the processes
 AvoidDiskWrites 1 # Good for performance and SD card longevity if applicable
 CookieAuthentication 1
