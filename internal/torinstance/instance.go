@@ -23,10 +23,14 @@ import (
 // maskIP partially hides an IP address for logging.
 // Example: 1.2.3.4 -> 1.2.x.x
 // Example: 2001:db8::1 -> 2001:db8:x:x
+// Returns "empty" if ipAddress is empty.
 func maskIP(ipAddress string) string {
+	if ipAddress == "" {
+		return "empty"
+	}
 	ip := net.ParseIP(ipAddress)
 	if ip == nil {
-		return "invalid_ip"
+		return "invalid_ip_format" // More specific than just "invalid_ip"
 	}
 
 	if ip.To4() != nil {
@@ -36,33 +40,29 @@ func maskIP(ipAddress string) string {
 		}
 	} else { // IPv6
 		parts := strings.Split(ipAddress, ":")
-		if len(parts) > 2 { // Ensure there are enough parts to mask
+		if len(parts) > 2 { 
 			maskedParts := []string{}
 			for i, part := range parts {
-				if i < 2 { // Keep the first two parts
+				if i < 2 { 
 					maskedParts = append(maskedParts, part)
 				} else {
-					// For simplicity in this example, just replace remaining with 'x'
-					// A more robust IPv6 masker might preserve more structure if needed
-					// but for logging, this should suffice.
-					if len(maskedParts) < 4 { // Show up to 4 segments, rest are 'x'
+					if len(maskedParts) < 4 { 
 						maskedParts = append(maskedParts, "x")
 					}
 				}
 			}
-			// Ensure we don't have too many 'x's if original was short
 			finalParts := []string{}
-			for i:=0; i<len(parts) && i < 4; i++ {
+			for i := 0; i < len(parts) && i < 4; i++ {
 				if i < len(maskedParts) {
 					finalParts = append(finalParts, maskedParts[i])
 				} else {
-					finalParts = append(finalParts, "x") // Should not happen if logic above is correct
+					finalParts = append(finalParts, "x") 
 				}
 			}
 			return strings.Join(finalParts, ":")
 		}
 	}
-	return "ip_mask_failed" // Fallback
+	return "ip_mask_failed" // Fallback for unexpected formats after parse
 }
 
 // Instance represents a single backend Tor process and its state.

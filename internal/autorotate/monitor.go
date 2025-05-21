@@ -113,7 +113,7 @@ func processEligibleInstanceForAutoRotation(ctx context.Context, instances []*to
 			if appCfg.AutoRotateStaggerDelay > 0 {
 				// log.Printf("AutoRotationMonitor: Staggering for %v after rotating instance %d.", appCfg.AutoRotateStaggerDelay, selectedInstance.InstanceID)
 				select {
-				case <-time.After(appCfg.AutoRotateStaggerDelay): // This is line 110
+				case <-time.After(appCfg.AutoRotateStaggerDelay): // This is line 108 in this version
 				case <-ctx.Done(): 
 					log.Printf("AutoRotationMonitor: Stagger delay for instance %d interrupted by shutdown.", selectedInstance.InstanceID)
 					return
