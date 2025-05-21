@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	DefaultTorAuthCookiePath = "/var/lib/tor/control_auth_cookie" 
+	DefaultTorAuthCookiePath = "/var/lib/tor/control_auth_cookie"
 	DefaultIPCheckURL        = "https://check.torproject.org/api/ip"
 	DefaultHealthCheckInterval = 30 * time.Second
 	DefaultSocksTimeout      = 10 * time.Second
@@ -22,10 +22,14 @@ const (
 	DefaultDNSBasePort       = 9200
 	DefaultNumTorInstances   = 1
 
-	// New defaults for IP Diversity feature
-	DefaultIPDiversityCheckInterval   = 5 * time.Minute
-	DefaultIPDiversityRotationCooldown = 15 * time.Minute
+	// Defaults for IP Diversity feature
+	DefaultIPDiversityCheckInterval        = 5 * time.Minute
+	DefaultIPDiversityRotationCooldown     = 15 * time.Minute
 	DefaultMinInstancesForIPDiversityCheck = 2 // Only run if at least this many instances exist
+
+	// New defaults for Automatic Circuit Rotation
+	DefaultAutoRotateCircuitIntervalSeconds = 3600 // 1 hour
+	DefaultAutoRotateStaggerDelaySeconds    = 30   // 30 seconds
 )
 
 // AppConfig holds the global configuration for the torgo application.
@@ -43,12 +47,17 @@ type AppConfig struct {
 	SocksTimeout        time.Duration
 
 	// For staggered rotation (shared state)
-	IsGlobalRotationActive int32 
+	IsGlobalRotationActive int32
 
-	// New config for IP Diversity
-	IPDiversityCheckInterval   time.Duration
-	IPDiversityRotationCooldown time.Duration
+	// Config for IP Diversity
+	IPDiversityCheckInterval        time.Duration
+	IPDiversityRotationCooldown     time.Duration
 	MinInstancesForIPDiversityCheck int
+
+	// New config for Automatic Circuit Rotation
+	AutoRotateCircuitInterval time.Duration
+	AutoRotateStaggerDelay    time.Duration
+	IsAutoRotationEnabled     bool
 }
 
 var GlobalConfig *AppConfig
@@ -96,7 +105,7 @@ func LoadConfig() *AppConfig {
 		if cfg.CommonDNSPort == "" {
 			cfg.CommonDNSPort = DefaultCommonDNSPort
 		}
-		
+
 		cfg.APIPort = os.Getenv("API_PORT")
 		if cfg.APIPort == "" {
 			cfg.APIPort = DefaultAPIPort
@@ -115,7 +124,7 @@ func LoadConfig() *AppConfig {
 		} else {
 			cfg.HealthCheckInterval = DefaultHealthCheckInterval
 		}
-		
+
 		cfg.IPCheckURL = os.Getenv("IP_CHECK_URL")
 		if cfg.IPCheckURL == "" {
 			cfg.IPCheckURL = DefaultIPCheckURL
@@ -150,10 +159,45 @@ func LoadConfig() *AppConfig {
 			cfg.MinInstancesForIPDiversityCheck = DefaultMinInstancesForIPDiversityCheck
 		}
 
+		// Automatic Circuit Rotation Config
+		autoRotateIntervalStr := os.Getenv("AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS")
+		if autoRotateSec, err := strconv.Atoi(autoRotateIntervalStr); err == nil && autoRotateSec > 0 {
+			cfg.AutoRotateCircuitInterval = time.Duration(autoRotateSec) * time.Second
+			cfg.IsAutoRotationEnabled = true
+		} else if autoRotateIntervalStr == "0" { // Explicitly disable
+			cfg.AutoRotateCircuitInterval = 0
+			cfg.IsAutoRotationEnabled = false
+			log.Println("Automatic circuit rotation is EXPLICITLY DISABLED via AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS=0.")
+		} else {
+			cfg.AutoRotateCircuitInterval = time.Duration(DefaultAutoRotateCircuitIntervalSeconds) * time.Second
+			// Enable by default if not set or invalid, unless it was explicitly "0"
+			cfg.IsAutoRotationEnabled = (autoRotateIntervalStr != "0")
+			if !cfg.IsAutoRotationEnabled { // Should not happen here unless logic error
+				log.Println("Automatic circuit rotation is disabled by default value logic (should enable unless 0).")
+			} else {
+                 log.Printf("Automatic circuit rotation interval not set or invalid ('%s'), defaulting to %v. Feature enabled.", autoRotateIntervalStr, cfg.AutoRotateCircuitInterval)
+            }
+		}
+
+
+		autoRotateStaggerStr := os.Getenv("AUTO_ROTATE_STAGGER_DELAY_SECONDS")
+		if autoRotateStaggerSec, err := strconv.Atoi(autoRotateStaggerStr); err == nil && autoRotateStaggerSec > 0 {
+			cfg.AutoRotateStaggerDelay = time.Duration(autoRotateStaggerSec) * time.Second
+		} else {
+			cfg.AutoRotateStaggerDelay = time.Duration(DefaultAutoRotateStaggerDelaySeconds) * time.Second
+		}
 
 		GlobalConfig = cfg
-		log.Printf("Configuration loaded: NumInstances=%d, APIPort=%s, CommonSOCKS=%s, CommonDNS=%s, IPDiversityCheckInterval=%v", 
-			cfg.NumTorInstances, cfg.APIPort, cfg.CommonSocksPort, cfg.CommonDNSPort, cfg.IPDiversityCheckInterval)
+		log.Printf("Configuration loaded: NumInstances=%d, APIPort=%s, CommonSOCKS=%s, CommonDNS=%s",
+			cfg.NumTorInstances, cfg.APIPort, cfg.CommonSocksPort, cfg.CommonDNSPort)
+		log.Printf("IP Diversity: CheckInterval=%v, Cooldown=%v, MinInstances=%d",
+			cfg.IPDiversityCheckInterval, cfg.IPDiversityRotationCooldown, cfg.MinInstancesForIPDiversityCheck)
+		if cfg.IsAutoRotationEnabled {
+			log.Printf("Auto Circuit Rotation: Enabled, Interval=%v, StaggerDelay=%v",
+				cfg.AutoRotateCircuitInterval, cfg.AutoRotateStaggerDelay)
+		} else {
+			log.Println("Auto Circuit Rotation: Disabled.")
+		}
 	})
 	return GlobalConfig
 }

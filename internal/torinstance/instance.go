@@ -17,32 +17,36 @@ import (
 	"time"
 
 	"golang.org/x/net/proxy"
-	"torgo/internal/config" 
+	"torgo/internal/config"
 )
 
 // Instance represents a single backend Tor process and its state.
 type Instance struct {
 	InstanceID       int
-	ControlHost      string 
-	BackendSocksHost string 
-	BackendDNSHost   string 
+	ControlHost      string
+	BackendSocksHost string
+	BackendDNSHost   string
 	AuthCookiePath   string
 	DataDir          string
 
-	Mu                sync.Mutex 
-	httpClient        *http.Client 
-	activeControlConn net.Conn
-	controlCookieHex  string    
-	IsHealthy         bool      
-	LastHealthCheck   time.Time 
-	ConsecutiveFailures int     
-	
+	Mu                  sync.Mutex
+	httpClient          *http.Client
+	activeControlConn   net.Conn
+	controlCookieHex    string
+	IsHealthy           bool
+	LastHealthCheck     time.Time
+	ConsecutiveFailures int
+
 	// Fields for IP Diversity Management
 	ExternalIP          string    // Last known external IP address
 	LastIPCheck         time.Time // Timestamp of the last successful IP check
+	LastIPChangeTime    time.Time // Timestamp of when the ExternalIP value actually changed
 	LastDiversityRotate time.Time // Timestamp of the last rotation triggered by IP diversity logic
 
-	appConfig *config.AppConfig 
+	// Field for Automatic Circuit Rotation
+	LastCircuitRecreationTime time.Time // Timestamp of the last successful NEWNYM signal
+
+	appConfig *config.AppConfig
 }
 
 // New creates a new Tor instance configuration.
@@ -51,15 +55,22 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 	socksPort := appCfg.SocksBasePort + id
 	dnsPort := appCfg.DNSBasePort + id
 
+	// Initialize time fields to a zero value, or distant past if preferred for logic
+	// Zero time is fine for checks like `IsZero()` or `time.Since(t) > interval`
+	// where a very large duration for uninitialized times is acceptable.
+	initialTime := time.Time{}
+
 	ti := &Instance{
-		InstanceID:       id,
-		ControlHost:      fmt.Sprintf("127.0.0.1:%d", controlPort),
-		BackendSocksHost: fmt.Sprintf("127.0.0.1:%d", socksPort),
-		BackendDNSHost:   fmt.Sprintf("127.0.0.1:%d", dnsPort),
-		AuthCookiePath:   fmt.Sprintf("/var/lib/tor/instance%d/control_auth_cookie", id),
-		DataDir:          fmt.Sprintf("/var/lib/tor/instance%d", id),
-		IsHealthy:        false,
-		appConfig:        appCfg,
+		InstanceID:                id,
+		ControlHost:               fmt.Sprintf("127.0.0.1:%d", controlPort),
+		BackendSocksHost:          fmt.Sprintf("127.0.0.1:%d", socksPort),
+		BackendDNSHost:            fmt.Sprintf("127.0.0.1:%d", dnsPort),
+		AuthCookiePath:            fmt.Sprintf("/var/lib/tor/instance%d/control_auth_cookie", id),
+		DataDir:                   fmt.Sprintf("/var/lib/tor/instance%d", id),
+		IsHealthy:                 false,
+		LastCircuitRecreationTime: initialTime, // Initialize
+		LastIPChangeTime:          initialTime, // Initialize
+		appConfig:                 appCfg,
 	}
 	ti.Mu.Lock()
 	ti.initializeHTTPClientUnlocked()
@@ -70,11 +81,11 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 func (ti *Instance) loadAndCacheControlCookieUnlocked(forceReload bool) error {
 	// Assumes ti.Mu is locked
 	if ti.controlCookieHex != "" && !forceReload {
-		return nil 
+		return nil
 	}
 	cookieBytes, err := os.ReadFile(ti.AuthCookiePath)
 	if err != nil {
-		ti.controlCookieHex = "" 
+		ti.controlCookieHex = ""
 		return fmt.Errorf("instance %d: failed to read cookie %s: %w", ti.InstanceID, ti.AuthCookiePath, err)
 	}
 	ti.controlCookieHex = hex.EncodeToString(cookieBytes)
@@ -83,12 +94,12 @@ func (ti *Instance) loadAndCacheControlCookieUnlocked(forceReload bool) error {
 
 func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, error) {
 	// Assumes ti.Mu is locked
-	if err := ti.loadAndCacheControlCookieUnlocked(false); err != nil { 
+	if err := ti.loadAndCacheControlCookieUnlocked(false); err != nil {
 		return nil, nil, fmt.Errorf("instance %d: pre-connect cookie load failed: %w", ti.InstanceID, err)
 	}
-    if ti.controlCookieHex == "" { 
-        return nil, nil, fmt.Errorf("instance %d: control cookie is empty after load attempt", ti.InstanceID)
-    }
+	if ti.controlCookieHex == "" {
+		return nil, nil, fmt.Errorf("instance %d: control cookie is empty after load attempt", ti.InstanceID)
+	}
 
 	conn, err := net.DialTimeout("tcp", ti.ControlHost, 5*time.Second)
 	if err != nil {
@@ -116,9 +127,9 @@ func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, erro
 	trimmedStatus := strings.TrimSpace(statusLine)
 	if !strings.HasPrefix(trimmedStatus, "250 OK") {
 		conn.Close()
-		if strings.HasPrefix(trimmedStatus, "515") { 
+		if strings.HasPrefix(trimmedStatus, "515") {
 			log.Printf("Instance %d: Control port authentication failed (515). Invalidating cached cookie. Will retry reading on next attempt. Tor msg: %s", ti.InstanceID, trimmedStatus)
-			ti.controlCookieHex = "" 
+			ti.controlCookieHex = ""
 		}
 		return nil, nil, fmt.Errorf("instance %d: tor control port authentication failed: %s", ti.InstanceID, trimmedStatus)
 	}
@@ -134,7 +145,7 @@ func (ti *Instance) CloseControlConnUnlocked() {
 }
 
 func (ti *Instance) SendTorCommand(command string) (string, error) {
-	ti.Mu.Lock() 
+	ti.Mu.Lock()
 	defer ti.Mu.Unlock()
 
 	var conn net.Conn
@@ -144,85 +155,113 @@ func (ti *Instance) SendTorCommand(command string) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		if ti.activeControlConn != nil {
 			conn = ti.activeControlConn
-			reader = bufio.NewReader(conn) 
+			reader = bufio.NewReader(conn)
 		} else {
 			conn, reader, err = ti.connectToTorControlUnlocked()
 			if err != nil {
-				if attempt == 0 { 
+				if attempt == 0 {
 					log.Printf("Instance %d SendTorCommand: connection attempt %d failed: %v. Retrying...", ti.InstanceID, attempt+1, err)
-					ti.CloseControlConnUnlocked() 
+					ti.CloseControlConnUnlocked()
 					if strings.Contains(err.Error(), "authentication failed") {
-						ti.controlCookieHex = "" 
+						ti.controlCookieHex = ""
 					}
-					continue 
+					continue
 				}
 				return "", fmt.Errorf("instance %d SendTorCommand: connection phase failed after retries: %w", ti.InstanceID, err)
 			}
 		}
 
-		conn.SetWriteDeadline(time.Now().Add(ti.appConfig.SocksTimeout)) 
+		conn.SetWriteDeadline(time.Now().Add(ti.appConfig.SocksTimeout))
 		if _, errWrite := conn.Write([]byte(command + "\r\n")); errWrite != nil {
-			conn.SetWriteDeadline(time.Time{})  
-			ti.CloseControlConnUnlocked()      
+			conn.SetWriteDeadline(time.Time{})
+			ti.CloseControlConnUnlocked()
 			log.Printf("Instance %d: Write failed for command '%s' (%v), connection closed. Attempt %d.", ti.InstanceID, command, errWrite, attempt+1)
-			if attempt == 0 { continue } 
+			if attempt == 0 {
+				continue
+			}
 			return "", fmt.Errorf("instance %d: write failed for command '%s': %w", ti.InstanceID, command, errWrite)
 		}
-		conn.SetWriteDeadline(time.Time{}) 
+		conn.SetWriteDeadline(time.Time{})
 
 		var responseBuffer bytes.Buffer
 		isMultiLine := strings.HasPrefix(command, "GETINFO")
-		readDeadlineDuration := 10 * time.Second 
-		if isMultiLine { readDeadlineDuration = 20 * time.Second }
+		readDeadlineDuration := 10 * time.Second
+		if isMultiLine {
+			readDeadlineDuration = 20 * time.Second
+		}
 		conn.SetReadDeadline(time.Now().Add(readDeadlineDuration))
 
 		for {
 			line, errRead := reader.ReadString('\n')
 			if errRead != nil {
-				conn.SetReadDeadline(time.Time{}) 
-				ti.CloseControlConnUnlocked()    
-				// log.Printf("Instance %d: Read failed for command '%s' (%v), connection closed. Attempt %d. Partial: '%s'", ti.InstanceID, command, errRead, attempt+1, responseBuffer.String())
-				if errRead == io.EOF && responseBuffer.Len() > 0 { 
-					return strings.TrimSpace(responseBuffer.String()), nil
+				conn.SetReadDeadline(time.Time{})
+				ti.CloseControlConnUnlocked()
+				if errRead == io.EOF && responseBuffer.Len() > 0 {
+					// Successfully read something before EOF
+					responseStr := strings.TrimSpace(responseBuffer.String())
+					if strings.HasPrefix(command, "SIGNAL NEWNYM") && strings.HasPrefix(responseStr, "250 OK") {
+						ti.LastCircuitRecreationTime = time.Now()
+					}
+					return responseStr, nil
 				}
-				if attempt == 0 { break } 
+				if attempt == 0 {
+					break
+				} // Break from inner read loop, will go to next attempt
 				return responseBuffer.String(), fmt.Errorf("instance %d: failed to read full response for '%s': %w. Partial: '%s'", ti.InstanceID, command, errRead, responseBuffer.String())
 			}
 			responseBuffer.WriteString(line)
 			trimmedLine := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmedLine, "250 OK") { return strings.TrimSpace(responseBuffer.String()), nil } 
-			if strings.HasPrefix(trimmedLine, "250 ") && !strings.HasPrefix(trimmedLine, "250-") && !isMultiLine { return strings.TrimSpace(responseBuffer.String()), nil } 
-			if strings.HasPrefix(trimmedLine, "5") { 
+
+			isOK := strings.HasPrefix(trimmedLine, "250 OK")
+			is250NotMulti := strings.HasPrefix(trimmedLine, "250 ") && !strings.HasPrefix(trimmedLine, "250-")
+
+			if (isOK || (is250NotMulti && !isMultiLine)) {
+				responseStr := strings.TrimSpace(responseBuffer.String())
+				if strings.HasPrefix(command, "SIGNAL NEWNYM") && strings.HasPrefix(responseStr, "250 OK") {
+					ti.LastCircuitRecreationTime = time.Now()
+					// log.Printf("Instance %d: NEWNYM successful, LastCircuitRecreationTime updated to %v", ti.InstanceID, ti.LastCircuitRecreationTime)
+				}
+				return responseStr, nil
+			}
+
+			if strings.HasPrefix(trimmedLine, "5") { // Tor error
 				if strings.HasPrefix(trimmedLine, "515") {
 					log.Printf("Instance %d: Received Tor error 515 for '%s'. Invalidating cookie for retry. Full error: %s", ti.InstanceID, command, trimmedLine)
 					ti.controlCookieHex = ""
-				} else {
-					// log.Printf("Instance %d: Received Tor error response for command '%s': %s", ti.InstanceID, command, trimmedLine)
 				}
-				if attempt == 0 { break } 
+				if attempt == 0 {
+					break
+				} // Break from inner read loop
 				return strings.TrimSpace(responseBuffer.String()), fmt.Errorf("tor error: %s", trimmedLine)
 			}
 		}
-		conn.SetReadDeadline(time.Time{}) 
-		if attempt == 0 { continue } 
+		conn.SetReadDeadline(time.Time{})
+		if attempt == 0 {
+			continue
+		} // Go to next attempt in outer loop
 	}
 	return "", fmt.Errorf("instance %d: SendTorCommand exhausted retries for command '%s'", ti.InstanceID, command)
 }
 
 func (ti *Instance) CheckHealth(ctx context.Context) bool {
-	healthCtx, cancel := context.WithTimeout(ctx, 7*time.Second) 
+	healthCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
 	defer cancel()
 
-	type result struct { response string; err error }
+	type result struct {
+		response string
+		err      error
+	}
 	ch := make(chan result, 1)
 
 	go func() {
+		// Use a non-locking version or handle lock carefully if SendTorCommand itself locks.
+		// SendTorCommand already handles its own locking.
 		resp, err := ti.SendTorCommand("GETINFO status/bootstrap-phase")
 		ch <- result{resp, err}
 	}()
 
 	isCurrentlyHealthy := false
-	var checkErrMessage string 
+	var checkErrMessage string
 
 	select {
 	case <-healthCtx.Done():
@@ -230,19 +269,19 @@ func (ti *Instance) CheckHealth(ctx context.Context) bool {
 	case res := <-ch:
 		expectedContent := "status/bootstrap-phase=PROGRESS=100 TAG=done SUMMARY=\"Done\""
 		if res.err == nil &&
-		   strings.Contains(res.response, "PROGRESS=100") &&
-		   strings.Contains(res.response, "TAG=done") {
-			if strings.Contains(res.response, expectedContent) || strings.Contains(res.response, "PROGRESS=100 TAG=done") { 
+			strings.Contains(res.response, "PROGRESS=100") &&
+			strings.Contains(res.response, "TAG=done") {
+			if strings.Contains(res.response, expectedContent) || strings.Contains(res.response, "PROGRESS=100 TAG=done") {
 				isCurrentlyHealthy = true
 				checkErrMessage = "Successfully bootstrapped"
 			} else {
-				isCurrentlyHealthy = true 
+				isCurrentlyHealthy = true
 				checkErrMessage = fmt.Sprintf("bootstrap 100%%, TAG=done, but summary/prefix mismatch: '%s'", firstNChars(res.response, 150))
 			}
 		} else {
 			if res.err != nil {
 				checkErrMessage = fmt.Sprintf("error during GETINFO: %v. Response: '%s'", res.err, firstNChars(res.response, 100))
-			} else { 
+			} else {
 				checkErrMessage = fmt.Sprintf("bootstrap not complete or unexpected response: '%s'", firstNChars(res.response, 150))
 			}
 		}
@@ -252,7 +291,7 @@ func (ti *Instance) CheckHealth(ctx context.Context) bool {
 	if ti.IsHealthy != isCurrentlyHealthy {
 		log.Printf("Instance %d: Health status changed to %v (was %v). Reason/Details: %s", ti.InstanceID, isCurrentlyHealthy, ti.IsHealthy, checkErrMessage)
 	}
-	if !isCurrentlyHealthy && ti.IsHealthy { 
+	if !isCurrentlyHealthy && ti.IsHealthy {
 		ti.ConsecutiveFailures++
 	} else if isCurrentlyHealthy {
 		ti.ConsecutiveFailures = 0
@@ -264,39 +303,39 @@ func (ti *Instance) CheckHealth(ctx context.Context) bool {
 }
 
 func (ti *Instance) initializeHTTPClientUnlocked() {
-    proxyURL, err := url.Parse("socks5://" + ti.BackendSocksHost)
-    if err != nil {
-        log.Printf("Instance %d ERROR: Failed to parse proxy URL %s: %v. HTTP client not updated.", ti.InstanceID, ti.BackendSocksHost, err)
-        ti.httpClient = nil
-        return
-    }
-    
-    contextDialer, err := proxy.FromURL(proxyURL, &net.Dialer{Timeout: ti.appConfig.SocksTimeout})
-    if err != nil {
-        log.Printf("Instance %d ERROR: Failed to create proxy context dialer for %s: %v. HTTP client not updated.", ti.InstanceID, ti.BackendSocksHost, err)
-        ti.httpClient = nil
-        return
-    }
+	proxyURL, err := url.Parse("socks5://" + ti.BackendSocksHost)
+	if err != nil {
+		log.Printf("Instance %d ERROR: Failed to parse proxy URL %s: %v. HTTP client not updated.", ti.InstanceID, ti.BackendSocksHost, err)
+		ti.httpClient = nil
+		return
+	}
 
-    httpTransport := &http.Transport{
-        DialContext: contextDialer.(proxy.ContextDialer).DialContext,
-        MaxIdleConns:        10,
-        IdleConnTimeout:     30 * time.Second,
-        TLSHandshakeTimeout: 10 * time.Second,
+	contextDialer, err := proxy.FromURL(proxyURL, &net.Dialer{Timeout: ti.appConfig.SocksTimeout})
+	if err != nil {
+		log.Printf("Instance %d ERROR: Failed to create proxy context dialer for %s: %v. HTTP client not updated.", ti.InstanceID, ti.BackendSocksHost, err)
+		ti.httpClient = nil
+		return
+	}
+
+	httpTransport := &http.Transport{
+		DialContext:         contextDialer.(proxy.ContextDialer).DialContext,
+		MaxIdleConns:        10,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2: true,
-    }
-    ti.httpClient = &http.Client{
-		Transport: httpTransport, 
-		Timeout: ti.appConfig.SocksTimeout * 3,
+		ForceAttemptHTTP2:   true,
+	}
+	ti.httpClient = &http.Client{
+		Transport: httpTransport,
+		Timeout:   ti.appConfig.SocksTimeout * 3,
 	}
 }
 
 func (ti *Instance) ReinitializeHTTPClient() {
-    ti.Mu.Lock()
-    defer ti.Mu.Unlock()
-    ti.initializeHTTPClientUnlocked()
-    log.Printf("Instance %d: HTTP client explicitly re-initialized.", ti.InstanceID)
+	ti.Mu.Lock()
+	defer ti.Mu.Unlock()
+	ti.initializeHTTPClientUnlocked()
+	log.Printf("Instance %d: HTTP client explicitly re-initialized.", ti.InstanceID)
 }
 
 func (ti *Instance) GetHTTPClient() *http.Client {
@@ -309,25 +348,29 @@ func (ti *Instance) GetHTTPClient() *http.Client {
 }
 
 // SetExternalIP updates the instance's last known external IP and check time.
-func (ti *Instance) SetExternalIP(ip string) {
-    ti.Mu.Lock()
-    defer ti.Mu.Unlock()
-    ti.ExternalIP = ip
-    ti.LastIPCheck = time.Now()
+// It also updates LastIPChangeTime if the IP has actually changed.
+func (ti *Instance) SetExternalIP(newIP string) {
+	ti.Mu.Lock()
+	defer ti.Mu.Unlock()
+
+	if ti.ExternalIP != newIP {
+		// log.Printf("Instance %d: External IP changed from '%s' to '%s'", ti.InstanceID, ti.ExternalIP, newIP)
+		ti.ExternalIP = newIP
+		ti.LastIPChangeTime = time.Now()
+	}
+	ti.LastIPCheck = time.Now()
 }
 
-// GetExternalIPInfo returns the last known external IP and check time.
-// Note: This method is not currently used by other packages but is here for completeness.
-func (ti *Instance) GetExternalIPInfo() (ip string, lastCheck time.Time) {
-    ti.Mu.Lock()
-    defer ti.Mu.Unlock()
-    return ti.ExternalIP, ti.LastIPCheck
+// GetExternalIPInfo returns the last known external IP, last check time, and last change time.
+func (ti *Instance) GetExternalIPInfo() (ip string, lastCheck time.Time, lastChange time.Time) {
+	ti.Mu.Lock()
+	defer ti.Mu.Unlock()
+	return ti.ExternalIP, ti.LastIPCheck, ti.LastIPChangeTime
 }
 
-
-func firstNChars(s string, n int) string { 
-    if len(s) > n {
-        return s[:n] + "..."
-    }
-    return s
+func firstNChars(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "..."
+	}
+	return s
 }

@@ -3,61 +3,71 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>torgo Web UI - Basic</title>
+    <title>torgo Web UI - Enhanced</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; }
-        header { text-align: center; margin-bottom: 20px; }
-        h1 { color: #2c3e50; }
-        h2 { border-bottom: 1px solid #ccc; padding-bottom: 5px; margin-top: 30px; }
-        .container { max-width: 1000px; margin: auto; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-        .status-section, .instances-section { margin-bottom: 20px; }
-        .instance-card { border: 1px solid #ddd; border-radius: 5px; padding: 15px; margin-bottom: 15px; background-color: #f9f9f9; }
-        .instance-card h3 { margin-top: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; margin: 0; padding: 20px; background-color: #f0f2f5; color: #1c1e21; line-height: 1.5; }
+        header { text-align: center; margin-bottom: 25px; padding-bottom:15px; border-bottom: 1px solid #dddfe2;}
+        h1 { color: #1877f2; font-size: 2em; margin-bottom: 5px;}
+        h2 { border-bottom: 1px solid #dddfe2; padding-bottom: 8px; margin-top: 30px; font-size: 1.5em; color: #333; }
+        .container { max-width: 1100px; margin: auto; background-color: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1), 0 8px 16px rgba(0,0,0,0.1); }
+        .status-section, .instances-section, .app-config-section { margin-bottom: 25px; }
+        .instance-card { border: 1px solid #dddfe2; border-radius: 8px; padding: 18px; margin-bottom: 18px; background-color: #f9f9f9; box-shadow: 0 1px 2px rgba(0,0,0,0.05); transition: box-shadow 0.2s ease-in-out; }
+        .instance-card:hover { box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        .instance-card h3 { margin-top: 0; color: #1877f2; font-size: 1.25em; }
         .status-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 8px; vertical-align: middle; }
-        .status-healthy { background-color: green; }
-        .status-unhealthy { background-color: red; }
-        .status-unknown { background-color: orange; }
-        button { padding: 8px 12px; margin-top: 10px; margin-right: 5px; border: none; border-radius: 4px; cursor: pointer; background-color: #3498db; color: white; font-size: 0.9em; }
-        button:hover { background-color: #2980b9; }
-        button:disabled { background-color: #bdc3c7; cursor: not-allowed; }
-        .btn-small { padding: 5px 8px; font-size: 0.8em; margin-top: 5px;}
+        .status-healthy { background-color: #42b72a; } /* Green */
+        .status-unhealthy { background-color: #fa3e3e; } /* Red */
+        .status-unknown { background-color: #ffba00; } /* Orange */
+        button { padding: 8px 15px; margin-top: 10px; margin-right: 8px; border: none; border-radius: 6px; cursor: pointer; background-color: #1877f2; color: white; font-size: 0.9em; font-weight: 500; transition: background-color 0.2s; }
+        button:hover { background-color: #166fe5; }
+        button:disabled { background-color: #ccd0d5; color: #8a8d91; cursor: not-allowed; }
+        .btn-small { padding: 6px 10px; font-size: 0.8em; margin-top: 5px;}
+        .btn-danger { background-color: #e74c3c; }
+        .btn-danger:hover { background-color: #c0392b; }
         .loading-spinner {
-            border: 2px solid #f3f3f3; border-top: 2px solid #3498db; border-radius: 50%;
+            border: 2px solid #f3f3f3; border-top: 2px solid #1877f2; border-radius: 50%;
             width: 14px; height: 14px; animation: spin 1s linear infinite;
             display: inline-block; margin-left: 5px; vertical-align: middle;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        pre { background-color: #eee; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 0.85em; }
+        pre { background-color: #f0f2f5; padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 0.88em; border: 1px solid #dddfe2; }
         #statsModal {
-            display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%;
-            overflow: auto; background-color: rgba(0,0,0,0.4); padding-top: 60px;
+            display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%;
+            overflow: auto; background-color: rgba(0,0,0,0.5); padding-top: 50px;
         }
-        .modal-content { background-color: #fefefe; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 700px; border-radius: 5px; }
-        .close-button { color: #aaa; float: right; font-size: 28px; font-weight: bold; }
+        .modal-content { background-color: #fff; margin: 5% auto; padding: 25px; border: 1px solid #dddfe2; width: 85%; max-width: 750px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .close-button { color: #aaa; float: right; font-size: 30px; font-weight: bold; line-height: 0.8; }
         .close-button:hover, .close-button:focus { color: black; text-decoration: none; cursor: pointer; }
-        .info-label { font-weight: 500; color: #555;}
-        .info-value { font-family: monospace; color: #2c3e50; font-size: 0.9em; }
-        .card-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top:10px; border-top: 1px solid #eee; padding-top: 10px;}
+        .info-label { font-weight: 600; color: #606770; min-width:120px; display:inline-block;}
+        .info-value { font-family: Menlo, Monaco, Consolas, "Courier New", monospace; color: #1c1e21; font-size: 0.9em; }
+        .card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top:12px; border-top: 1px solid #e7e7e7; padding-top: 12px;}
+        .grid-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
+        .app-config-details p { margin: 6px 0; font-size: 0.95em; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>torgo Web UI (Basic)</h1>
+            <h1>torgo Control Panel</h1>
             <p>Manage and Monitor Your Tor Instances</p>
         </header>
 
+        <section class="app-config-section">
+            <h2>Application Configuration</h2>
+            <div id="appConfigDetailsContainer" class="app-config-details">Loading app configuration...</div>
+        </section>
+
         <section class="status-section">
             <h2>Common Proxy Status</h2>
-            <p>SOCKS5 Proxy (<span id="commonSocksPortDisplay">N/A</span>): <span id="commonSocksStatus">Loading...</span></p>
-            <p>DNS Proxy (<span id="commonDnsPortDisplay">N/A</span>): <span id="commonDnsStatus">Loading...</span></p>
-            <p>Last updated: <span id="lastUpdatedTimestamp">Never</span> <button id="refreshAllButton">Refresh All Data</button></p>
+            <p><span class="info-label">SOCKS5 Proxy:</span> <span id="commonSocksPortDisplay" class="info-value">N/A</span> - Status: <span id="commonSocksStatus">Loading...</span></p>
+            <p><span class="info-label">DNS Proxy:</span> <span id="commonDnsPortDisplay" class="info-value">N/A</span> - Status: <span id="commonDnsStatus">Loading...</span></p>
+            <p>Last updated: <span id="lastUpdatedTimestamp" class="info-value">Never</span> <button id="refreshAllButton">Refresh All Data</button></p>
         </section>
 
         <section class="instances-section">
             <h2>Tor Instances (<span id="instanceCount">0</span>)</h2>
             <button id="rotateAllStaggeredButton">Rotate All Healthy Staggered</button>
-            <div id="instancesContainer" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px;">
+            <div id="instancesContainer" class="grid-container">
                 </div>
         </section>
 
@@ -73,10 +83,11 @@
     <script>
         const API_BASE_URL = `${window.location.origin}/api/v1`;
         let appDetails = null;
-        let instancesData = {}; 
+        let instancesData = {};
         let refreshIntervalId = null;
-        const REFRESH_INTERVAL_MS = 20000; 
+        const REFRESH_INTERVAL_MS = 20000;
 
+        const appConfigDetailsContainer = document.getElementById('appConfigDetailsContainer');
         const commonSocksPortDisplay = document.getElementById('commonSocksPortDisplay');
         const commonSocksStatus = document.getElementById('commonSocksStatus');
         const commonDnsPortDisplay = document.getElementById('commonDnsPortDisplay');
@@ -91,6 +102,34 @@
         const modalStatsContent = document.getElementById('modalStatsContent');
         const closeModalButton = document.getElementById('closeModalButton');
 
+        function formatTimeAgo(dateString) {
+            if (!dateString || dateString.startsWith("0001-01-01")) {
+                return "Never";
+            }
+            const date = new Date(dateString);
+            const now = new Date();
+            const seconds = Math.round((now - date) / 1000);
+            const minutes = Math.round(seconds / 60);
+            const hours = Math.round(minutes / 60);
+            const days = Math.round(hours / 24);
+
+            if (seconds < 5) return "Just now";
+            if (seconds < 60) return `${seconds} sec ago`;
+            if (minutes < 60) return `${minutes} min ago`;
+            if (hours < 24) return `${hours} hr ago`;
+            return `${days} days ago`;
+        }
+        
+        function formatDuration(seconds) {
+            if (seconds === 0) return "Disabled";
+            if (seconds < 60) return `${seconds}s`;
+            const minutes = Math.floor(seconds / 60);
+            const remainingSeconds = seconds % 60;
+            if (remainingSeconds === 0) return `${minutes}m`;
+            return `${minutes}m ${remainingSeconds}s`;
+        }
+
+
         async function fetchData(urlPath, options = {}) {
             try {
                 const response = await fetch(`${API_BASE_URL}${urlPath}`, options);
@@ -103,14 +142,14 @@
                 if (contentType && contentType.indexOf("application/json") !== -1) {
                     return await response.json();
                 } else {
-                    return { plain_text_response: await response.text() }; 
+                    return { plain_text_response: await response.text() };
                 }
             } catch (error) {
                 console.warn(`Network error fetching ${urlPath}:`, error);
                 return { error: error.message };
             }
         }
-        
+
         async function postData(urlPath, body = null) {
              try {
                 const options = { method: 'POST' };
@@ -119,14 +158,14 @@
                     options.body = JSON.stringify(body);
                 }
                 const response = await fetch(`${API_BASE_URL}${urlPath}`, options);
-                const responseText = await response.text(); 
+                const responseText = await response.text();
                 if (!response.ok) {
                     throw new Error(`HTTP error ${response.status}: ${responseText}`);
                 }
-                try { 
+                try {
                     return JSON.parse(responseText);
-                } catch (e) { 
-                    return responseText; 
+                } catch (e) {
+                    return responseText;
                 }
             } catch (error) {
                 console.error(`POST error for ${urlPath}:`, error);
@@ -136,7 +175,7 @@
 
         function createInstanceCard(instanceId) {
             let card = document.getElementById(`instance-${instanceId}-card`);
-            if (card) return; 
+            if (card) return;
 
             card = document.createElement('div');
             card.id = `instance-${instanceId}-card`;
@@ -144,10 +183,13 @@
             card.innerHTML = `
                 <h3>Instance ${instanceId}</h3>
                 <p><span class="info-label">Status:</span> <span id="instance-${instanceId}-status-dot" class="status-dot status-unknown"></span><span id="instance-${instanceId}-status-text">Loading...</span></p>
+                <p><small><span class="info-label">External IP:</span> <span id="instance-${instanceId}-ip" class="info-value">Loading...</span> <button id="refresh-ip-btn-${instanceId}" class="btn-small" title="Refresh IP for this instance">🔄 IP</button></small></p>
+                <p><small><span class="info-label">IP Last Change:</span> <span id="instance-${instanceId}-ip-change-time" class="info-value">N/A</span></small></p>
+                <p><small><span class="info-label">Circuit Last Rec.:</span> <span id="instance-${instanceId}-circuit-rec-time" class="info-value">N/A</span></small></p>
+                <hr style="border:0; border-top: 1px solid #eee; margin: 10px 0;">
                 <p><small><span class="info-label">Control Port:</span> <span id="instance-${instanceId}-control" class="info-value">N/A</span></small></p>
                 <p><small><span class="info-label">Backend SOCKS:</span> <span id="instance-${instanceId}-socks" class="info-value">N/A</span></small></p>
                 <p><small><span class="info-label">Backend DNS:</span> <span id="instance-${instanceId}-dns" class="info-value">N/A</span></small></p>
-                <p><small><span class="info-label">External IP:</span> <span id="instance-${instanceId}-ip" class="info-value">Loading...</span> <button id="refresh-ip-btn-${instanceId}" class="btn-small" title="Refresh IP for this instance">🔄 IP</button></small></p>
                 <p><small><span class="info-label">Bootstrap:</span> <span id="instance-${instanceId}-bootstrap" class="info-value">N/A</span></small></p>
                 <p><small><span class="info-label">Version:</span> <span id="instance-${instanceId}-version" class="info-value">N/A</span></small></p>
                 <div class="card-actions">
@@ -167,8 +209,10 @@
             document.getElementById(`refresh-ip-btn-${instanceId}`).addEventListener('click', async () => {
                 const ipElem = document.getElementById(`instance-${instanceId}-ip`);
                 ipElem.textContent = 'Fetching IP...';
-                const ipData = await fetchData(`/tor${instanceId}/ip`);
-                instancesData[instanceId] = { ...instancesData[instanceId], ip: ipData };
+                const ipData = await fetchData(`/tor${instanceId}/ip`); // This API call updates IP on backend
+                // After IP is fetched by API, re-fetch full config to get updated LastIPChangeTime
+                const configData = await fetchData(`/tor${instanceId}/config`);
+                instancesData[instanceId] = { ...instancesData[instanceId], ip: ipData, config: configData };
                 updateInstanceCardUI(instanceId, instancesData[instanceId]);
             });
         }
@@ -183,14 +227,17 @@
             const socksText = getElem('socks');
             const dnsText = getElem('dns');
             const ipText = getElem('ip');
+            const ipChangeTimeText = getElem('ip-change-time');
+            const circuitRecTimeText = getElem('circuit-rec-time');
 
-            if (!statusDot) return; 
+
+            if (!statusDot) return;
 
             if (data && data.health && !data.health.error) {
                 statusDot.className = data.health.cached_is_healthy ? 'status-dot status-healthy' : 'status-dot status-unhealthy';
                 statusText.textContent = data.health.cached_is_healthy ? 'Healthy' : 'Unhealthy';
                  if (data.health.last_health_check_at) {
-                    statusText.textContent += ` (as of ${new Date(data.health.last_health_check_at).toLocaleTimeString()})`;
+                    statusText.textContent += ` (checked ${formatTimeAgo(data.health.last_health_check_at)})`;
                 }
             } else {
                 statusDot.className = 'status-dot status-unknown';
@@ -200,29 +247,38 @@
             if (data && data.stats && !data.stats.error) {
                 const bootstrapSummary = data.stats.bootstrap_status ? data.stats.bootstrap_status.match(/SUMMARY="([^"]+)"/) : null;
                 bootstrapText.textContent = bootstrapSummary ? bootstrapSummary[1] : (data.stats.bootstrap_status || 'N/A');
+                if (data.stats.bootstrap_error) bootstrapText.textContent += ` (Error: ${data.stats.bootstrap_error})`;
                 versionText.textContent = data.stats.version || "N/A";
+                if (data.stats.version_error) versionText.textContent += ` (Error: ${data.stats.version_error})`;
             } else {
                  bootstrapText.textContent = (data && data.stats && data.stats.error) ? `Error: ${data.stats.error}` : 'Stats N/A';
                  versionText.textContent = "N/A";
             }
-            
+
             if (data && data.config && !data.config.error) {
                 controlText.textContent = data.config.control_host || 'N/A';
                 socksText.textContent = data.config.backend_socks_host || 'N/A';
                 dnsText.textContent = data.config.backend_dns_host || 'N/A';
+                ipText.textContent = data.config.external_ip || 'N/A';
+                ipChangeTimeText.textContent = formatTimeAgo(data.config.last_ip_change_at);
+                circuitRecTimeText.textContent = formatTimeAgo(data.config.last_circuit_recreation_at);
             } else {
                 controlText.textContent = 'N/A';
                 socksText.textContent = 'N/A';
                 dnsText.textContent = 'N/A';
+                ipText.textContent = 'N/A';
+                ipChangeTimeText.textContent = 'N/A';
+                circuitRecTimeText.textContent = 'N/A';
+                 if (data && data.config && data.config.error) {
+                    ipText.textContent = `Error: ${data.config.error}`;
+                }
             }
-
-            if (data && data.ip && !data.ip.error) {
-                ipText.textContent = data.ip.IP || (data.ip.plain_text_response ? 'Non-JSON IP ('+ data.ip.plain_text_response.substring(0,30) +'...)' : 'N/A');
-            } else {
-                ipText.textContent = (data && data.ip && data.ip.error) ? `Error: ${data.ip.error}` : 'IP N/A';
+             // Fallback for IP if config failed but direct IP call succeeded (less likely now with integrated fetch)
+            if (data && data.ip && !data.ip.error && ipText.textContent === 'N/A') {
+                 ipText.textContent = data.ip.IP || (data.ip.plain_text_response ? `Non-JSON IP (${data.ip.plain_text_response.substring(0,20)}...)` : 'N/A');
             }
         }
-        
+
         async function showFullStats(instanceId) {
             modalTitle.textContent = `Full Stats for Instance ${instanceId}`;
             modalStatsContent.textContent = 'Loading stats...';
@@ -253,18 +309,18 @@
             }
             button.disabled = false;
             spinner.style.display = 'none';
-            // Fetch data for this specific instance again soon after rotation
-            setTimeout(() => fetchAndRenderInstanceData(instanceId), 3000); 
+            setTimeout(() => fetchAndRenderInstanceData(instanceId), 2000); // Refresh data sooner
         }
-        
+
         rotateAllStaggeredButton.onclick = async function() {
             rotateAllStaggeredButton.disabled = true;
             rotateAllStaggeredButton.textContent = "Rotating All (Streaming)...";
-            
+
             try {
-                const response = await fetch(`${API_BASE_URL}/rotate-all-staggered`, { method: 'POST' });
+                const response = await fetch(`${API_BASE_URL}/rotate-all-staggered`, { method: 'POST' }); // Or GET if preferred
                 if (!response.ok) {
-                    throw new Error(`HTTP error ${response.status}`);
+                    const errorText = await response.text();
+                    throw new Error(`HTTP error ${response.status}: ${errorText}`);
                 }
                 // For a truly streaming response, you'd process response.body.getReader()
                 // For this basic UI, we'll just acknowledge and let user check logs/status later via refresh
@@ -277,12 +333,12 @@
 
             rotateAllStaggeredButton.disabled = false;
             rotateAllStaggeredButton.textContent = "Rotate All Healthy Staggered";
-            setTimeout(() => fetchAndRenderAllInstances(), 5000); 
+            setTimeout(() => fetchAndRenderAllInstances(), 5000);
         }
 
         function updateCommonProxyStatusDisplay() {
             let healthyBackendCount = 0;
-            const configuredInstances = (appDetails && appDetails.num_instances) ? parseInt(appDetails.num_instances, 10) : 0;
+            const configuredInstances = (appDetails && typeof appDetails.num_instances !== 'undefined') ? parseInt(appDetails.num_instances, 10) : 0;
 
             if (configuredInstances > 0) {
                 for (let i = 1; i <= configuredInstances; i++) {
@@ -291,11 +347,11 @@
                     }
                 }
             }
-            
+
             commonSocksPortDisplay.textContent = (appDetails && appDetails.common_socks_port) ? appDetails.common_socks_port : 'N/A';
             commonDnsPortDisplay.textContent = (appDetails && appDetails.common_dns_port) ? appDetails.common_dns_port : 'N/A';
 
-            if (!appDetails) { 
+            if (!appDetails) {
                 commonSocksStatus.textContent = 'Loading app details...';
                 commonDnsStatus.textContent = 'Loading app details...';
             } else if (configuredInstances === 0) {
@@ -304,67 +360,87 @@
             } else if (healthyBackendCount > 0) {
                 commonSocksStatus.innerHTML = `<span class="status-dot status-healthy"></span>Operational (${healthyBackendCount}/${configuredInstances} healthy)`;
                 commonDnsStatus.innerHTML = `<span class="status-dot status-healthy"></span>Operational (${healthyBackendCount}/${configuredInstances} healthy)`;
-            } else { 
+            } else {
                 commonSocksStatus.innerHTML = `<span class="status-dot status-unhealthy"></span>Offline (0/${configuredInstances} healthy)`;
                 commonDnsStatus.innerHTML = `<span class="status-dot status-unhealthy"></span>Offline (0/${configuredInstances} healthy)`;
             }
         }
         
+        function renderAppConfigDetails(details) {
+            if (!details || details.error) {
+                appConfigDetailsContainer.innerHTML = '<p>Error loading application configuration.</p>';
+                return;
+            }
+            let html = `<p><span class="info-label">Tor Instances:</span> <span class="info-value">${details.num_instances}</span></p>`;
+            html += `<p><span class="info-label">API Port:</span> <span class="info-value">${details.api_port}</span></p>`;
+            html += `<p><span class="info-label">Health Check Interval:</span> <span class="info-value">${formatDuration(details.health_check_interval_seconds)}</span></p>`;
+            html += `<p><span class="info-label">IP Diversity Check Interval:</span> <span class="info-value">${formatDuration(details.ip_diversity_check_interval_seconds)}</span></p>`;
+            html += `<p><span class="info-label">Auto Circuit Rotation:</span> <span class="info-value">${details.auto_rotation_enabled ? 'Enabled' : 'Disabled'}</span></p>`;
+            if (details.auto_rotation_enabled) {
+                html += `<p><span class="info-label">Auto Rotation Interval:</span> <span class="info-value">${formatDuration(details.auto_rotate_circuit_interval_seconds)}</span></p>`;
+                html += `<p><span class="info-label">Auto Rotation Stagger:</span> <span class="info-value">${formatDuration(details.auto_rotate_stagger_delay_seconds)}</span></p>`;
+            }
+             html += `<p><span class="info-label">Manual Stagger Delay:</span> <span class="info-value">${formatDuration(details.rotation_stagger_delay_seconds)}</span></p>`;
+            appConfigDetailsContainer.innerHTML = html;
+        }
+
+
         async function fetchAndRenderInstanceData(instanceId) {
             if (!document.getElementById(`instance-${instanceId}-card`)) {
                 createInstanceCard(instanceId);
             }
             try {
-                const [health, stats, config, ip] = await Promise.all([
-                    fetchData(`/tor${instanceId}/health`), 
-                    fetchData(`/tor${instanceId}/stats`),
-                    fetchData(`/tor${instanceId}/config`),
-                    fetchData(`/tor${instanceId}/ip`)
-                ]);
-                instancesData[instanceId] = { health, stats, config, ip }; 
+                // Fetch config first as it contains most time fields
+                const config = await fetchData(`/tor${instanceId}/config`);
+                // Then fetch other details, some might be redundant if already in config, but good for separation
+                const health = await fetchData(`/tor${instanceId}/health`);
+                const stats = await fetchData(`/tor${instanceId}/stats`);
+                // IP is part of config now, direct /ip call is mainly for forcing an update via proxy
+                // const ip = await fetchData(`/tor${instanceId}/ip`); 
+
+                instancesData[instanceId] = { health, stats, config /*, ip */ };
                 updateInstanceCardUI(instanceId, instancesData[instanceId]);
             } catch (error) {
                  console.error(`Error fetching data bundle for instance ${instanceId}:`, error);
-                 updateInstanceCardUI(instanceId, { 
-                     health: {error: 'Fetch bundle failed'}, 
-                     stats: {error: 'Fetch bundle failed'}, 
-                     config: {error: 'Fetch bundle failed'},
-                     ip: {error: 'Fetch bundle failed'} 
+                 updateInstanceCardUI(instanceId, {
+                     health: {error: 'Fetch bundle failed'},
+                     stats: {error: 'Fetch bundle failed'},
+                     config: {error: 'Fetch bundle failed'}
                  });
             }
         }
 
         async function fetchAndRenderAllInstances() {
-            if (!appDetails) { // Ensure appDetails is fetched if not already
+            if (!appDetails) {
                 const details = await fetchData("/app-details");
-                if (details.error || typeof details.num_instances === 'undefined') { 
-                     appDetails = { num_instances: 0, common_socks_port: 'N/A', common_dns_port: 'N/A' }; 
+                if (details.error || typeof details.num_instances === 'undefined') {
+                     appDetails = { num_instances: 0, common_socks_port: 'N/A', common_dns_port: 'N/A' };
                      console.error("Error fetching application details or num_instances missing:", details.error);
                 } else {
                     appDetails = details;
                 }
+                renderAppConfigDetails(appDetails); // Render app config details
             }
-            
+
             instanceCountDisplay.textContent = appDetails.num_instances || 0;
             commonSocksPortDisplay.textContent = appDetails.common_socks_port || 'N/A';
             commonDnsPortDisplay.textContent = appDetails.common_dns_port || 'N/A';
 
-            const numInstances = appDetails.num_instances || 0; // Use 0 if undefined
+            const numInstances = appDetails.num_instances || 0;
             if (numInstances === 0) {
                  instancesContainer.innerHTML = '<p>No Tor instances configured.</p>';
-                 updateCommonProxyStatusDisplay(); // Still update common status
+                 updateCommonProxyStatusDisplay();
                  return;
             }
-            
+
             const instancePromises = [];
             for (let i = 1; i <= numInstances; i++) {
-                // Ensure card exists before pushing promise to fetch data for it
                 if (!document.getElementById(`instance-${i}-card`)) {
                     createInstanceCard(i);
                 }
                 instancePromises.push(fetchAndRenderInstanceData(i));
             }
-            
+
             try {
                 await Promise.all(instancePromises);
             } catch (e) {
@@ -373,14 +449,15 @@
             updateCommonProxyStatusDisplay();
             lastUpdatedTimestamp.textContent = new Date().toLocaleTimeString();
         }
-        
+
         refreshAllButton.addEventListener('click', () => {
             lastUpdatedTimestamp.textContent = 'Refreshing...';
+            appDetails = null; // Force refetch of app details as well
             fetchAndRenderAllInstances();
         });
 
         async function initializeUI() {
-            await fetchAndRenderAllInstances(); 
+            await fetchAndRenderAllInstances();
             if (refreshIntervalId) clearInterval(refreshIntervalId);
             refreshIntervalId = setInterval(fetchAndRenderAllInstances, REFRESH_INTERVAL_MS);
         }
