@@ -1,7 +1,7 @@
 DataDirectory __DATADIR__
-SocksPort 0.0.0.0:__SOCKSPORT__
-ControlPort 0.0.0.0:__CONTROLPORT__
-DNSPort 0.0.0.0:__DNSPORT__
+SocksPort __SOCKSPORT__
+ControlPort __CONTROLPORT__
+DNSPort __DNSPORT__
 
 CookieAuthentication 1
 Log notice stdout
