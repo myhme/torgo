@@ -1,7 +1,8 @@
 DataDirectory __DATADIR__
-SocksPort 0.0.0.0:__SOCKSPORT__
-ControlPort 0.0.0.0:__CONTROLPORT__
-DNSPort 0.0.0.0:__DNSPORT__
+PidFile __PIDFILE__
+SocksPort __SOCKSPORT__
+ControlPort __CONTROLPORT__
+DNSPort __DNSPORT__
 
 CookieAuthentication 1
 Log notice stdout
@@ -25,4 +26,4 @@ ReducedCircuitPadding 0
 MaxCircuitDirtiness 300
 
 # Consider adding these for better stability with multiple instances if issues arise:
-# MaxMemInQueues 20MB # Example, adjust based on resources
+# MaxMemInQueues 20MB # Example, adjust based on resourcess
