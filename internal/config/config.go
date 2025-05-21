@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings" // Added for TrimSpace
 	"sync"
 	"time"
 )
@@ -25,7 +26,7 @@ const (
 	// Defaults for IP Diversity feature
 	DefaultIPDiversityCheckInterval        = 5 * time.Minute
 	DefaultIPDiversityRotationCooldown     = 15 * time.Minute
-	DefaultMinInstancesForIPDiversityCheck = 2 // Only run if at least this many instances exist
+	DefaultMinInstancesForIPDiversityCheck = 2
 
 	// New defaults for Automatic Circuit Rotation
 	DefaultAutoRotateCircuitIntervalSeconds = 3600 // 1 hour
@@ -46,15 +47,12 @@ type AppConfig struct {
 	IPCheckURL          string
 	SocksTimeout        time.Duration
 
-	// For staggered rotation (shared state)
 	IsGlobalRotationActive int32
 
-	// Config for IP Diversity
 	IPDiversityCheckInterval        time.Duration
 	IPDiversityRotationCooldown     time.Duration
 	MinInstancesForIPDiversityCheck int
 
-	// New config for Automatic Circuit Rotation
 	AutoRotateCircuitInterval time.Duration
 	AutoRotateStaggerDelay    time.Duration
 	IsAutoRotationEnabled     bool
@@ -63,7 +61,6 @@ type AppConfig struct {
 var GlobalConfig *AppConfig
 var once sync.Once
 
-// LoadConfig loads configuration from environment variables or defaults.
 func LoadConfig() *AppConfig {
 	once.Do(func() {
 		log.Println("Loading application configuration...")
@@ -137,7 +134,6 @@ func LoadConfig() *AppConfig {
 			cfg.SocksTimeout = DefaultSocksTimeout
 		}
 
-		// IP Diversity Config
 		ipDiversityIntervalStr := os.Getenv("IP_DIVERSITY_CHECK_INTERVAL_SECONDS")
 		if ipDiversitySec, err := strconv.Atoi(ipDiversityIntervalStr); err == nil && ipDiversitySec > 0 {
 			cfg.IPDiversityCheckInterval = time.Duration(ipDiversitySec) * time.Second
@@ -153,32 +149,38 @@ func LoadConfig() *AppConfig {
 		}
 
 		minInstancesStr := os.Getenv("MIN_INSTANCES_FOR_IP_DIVERSITY_CHECK")
-		if minInst, err := strconv.Atoi(minInstancesStr); err == nil && minInst >= 0 { // Allow 0 to disable
+		if minInst, err := strconv.Atoi(minInstancesStr); err == nil && minInst >= 0 {
 			cfg.MinInstancesForIPDiversityCheck = minInst
 		} else {
 			cfg.MinInstancesForIPDiversityCheck = DefaultMinInstancesForIPDiversityCheck
 		}
 
-		// Automatic Circuit Rotation Config
-		autoRotateIntervalStr := os.Getenv("AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS")
-		if autoRotateSec, err := strconv.Atoi(autoRotateIntervalStr); err == nil && autoRotateSec > 0 {
-			cfg.AutoRotateCircuitInterval = time.Duration(autoRotateSec) * time.Second
-			cfg.IsAutoRotationEnabled = true
-		} else if autoRotateIntervalStr == "0" { // Explicitly disable
-			cfg.AutoRotateCircuitInterval = 0
-			cfg.IsAutoRotationEnabled = false
-			log.Println("Automatic circuit rotation is EXPLICITLY DISABLED via AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS=0.")
-		} else {
-			cfg.AutoRotateCircuitInterval = time.Duration(DefaultAutoRotateCircuitIntervalSeconds) * time.Second
-			// Enable by default if not set or invalid, unless it was explicitly "0"
-			cfg.IsAutoRotationEnabled = (autoRotateIntervalStr != "0")
-			if !cfg.IsAutoRotationEnabled { // Should not happen here unless logic error
-				log.Println("Automatic circuit rotation is disabled by default value logic (should enable unless 0).")
-			} else {
-                 log.Printf("Automatic circuit rotation interval not set or invalid ('%s'), defaulting to %v. Feature enabled.", autoRotateIntervalStr, cfg.AutoRotateCircuitInterval)
-            }
-		}
+		// --- Automatic Circuit Rotation Config ---
+		rawAutoRotateIntervalStr := os.Getenv("AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS")
+		trimmedAutoRotateIntervalStr := strings.TrimSpace(rawAutoRotateIntervalStr)
+		log.Printf("Config: Raw AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS: '%s', Trimmed: '%s'", rawAutoRotateIntervalStr, trimmedAutoRotateIntervalStr)
 
+		if trimmedAutoRotateIntervalStr == "0" {
+			cfg.IsAutoRotationEnabled = false
+			cfg.AutoRotateCircuitInterval = 0
+			log.Println("Config: Automatic circuit rotation is EXPLICITLY DISABLED via AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS=0.")
+		} else {
+			autoRotateSec, err := strconv.Atoi(trimmedAutoRotateIntervalStr)
+			if err == nil && autoRotateSec > 0 {
+				cfg.AutoRotateCircuitInterval = time.Duration(autoRotateSec) * time.Second
+				cfg.IsAutoRotationEnabled = true
+				log.Printf("Config: Automatic circuit rotation ENABLED. Interval set to %v from ENV.", cfg.AutoRotateCircuitInterval)
+			} else {
+				// Not "0" and not a valid positive integer. Default to enabled with default interval.
+				cfg.AutoRotateCircuitInterval = time.Duration(DefaultAutoRotateCircuitIntervalSeconds) * time.Second
+				cfg.IsAutoRotationEnabled = true // Default to enabled if not explicitly "0"
+				if trimmedAutoRotateIntervalStr == "" {
+					log.Printf("Config: AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS not set. Defaulting to ENABLED with interval %v.", cfg.AutoRotateCircuitInterval)
+				} else {
+					log.Printf("Config: Invalid AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS ('%s'). Error: %v. Defaulting to ENABLED with interval %v.", trimmedAutoRotateIntervalStr, err, cfg.AutoRotateCircuitInterval)
+				}
+			}
+		}
 
 		autoRotateStaggerStr := os.Getenv("AUTO_ROTATE_STAGGER_DELAY_SECONDS")
 		if autoRotateStaggerSec, err := strconv.Atoi(autoRotateStaggerStr); err == nil && autoRotateStaggerSec > 0 {
@@ -186,6 +188,7 @@ func LoadConfig() *AppConfig {
 		} else {
 			cfg.AutoRotateStaggerDelay = time.Duration(DefaultAutoRotateStaggerDelaySeconds) * time.Second
 		}
+		// --- End Automatic Circuit Rotation Config ---
 
 		GlobalConfig = cfg
 		log.Printf("Configuration loaded: NumInstances=%d, APIPort=%s, CommonSOCKS=%s, CommonDNS=%s",
@@ -193,10 +196,10 @@ func LoadConfig() *AppConfig {
 		log.Printf("IP Diversity: CheckInterval=%v, Cooldown=%v, MinInstances=%d",
 			cfg.IPDiversityCheckInterval, cfg.IPDiversityRotationCooldown, cfg.MinInstancesForIPDiversityCheck)
 		if cfg.IsAutoRotationEnabled {
-			log.Printf("Auto Circuit Rotation: Enabled, Interval=%v, StaggerDelay=%v",
+			log.Printf("Auto Circuit Rotation: Final Status: ENABLED, Interval=%v, StaggerDelay=%v",
 				cfg.AutoRotateCircuitInterval, cfg.AutoRotateStaggerDelay)
 		} else {
-			log.Println("Auto Circuit Rotation: Disabled.")
+			log.Println("Auto Circuit Rotation: Final Status: DISABLED.")
 		}
 	})
 	return GlobalConfig

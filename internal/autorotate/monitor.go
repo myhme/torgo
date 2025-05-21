@@ -69,36 +69,27 @@ func processEligibleInstanceForAutoRotation(ctx context.Context, instances []*to
 		inst.Mu.Lock()
 		isHealthy := inst.IsHealthy
 		lastRecTime := inst.LastCircuitRecreationTime
-		// instID := inst.InstanceID // This was the unused variable
 		inst.Mu.Unlock()
 
 		if !isHealthy {
-			// log.Printf("AutoRotationMonitor: Instance %d is not healthy, skipping.", inst.InstanceID) // Use inst.InstanceID directly
+			// log.Printf("AutoRotationMonitor: Instance %d is not healthy, skipping.", inst.InstanceID)
 			continue
 		}
 
-		// If LastCircuitRecreationTime is zero, it means it hasn't been rotated yet.
-		// Consider it eligible if the instance has been up for at least the interval.
-		// However, SendTorCommand updates this on first NEWNYM. If it's still zero,
-		// it implies no NEWNYM has ever been successful.
-		// For simplicity, if it's zero, we can treat it as very old.
 		var circuitAge time.Duration
 		if lastRecTime.IsZero() {
-			// If never rotated, consider it "infinitely" old for rotation purposes,
-			// or perhaps use its startup time if available (not tracked currently).
-			// For now, if zero, it's a prime candidate if healthy.
-			circuitAge = now.Sub(time.Time{}) // Effectively a very large duration
-			// log.Printf("AutoRotationMonitor: Instance %d LastCircuitRecreationTime is zero.", inst.InstanceID) // Use inst.InstanceID
+			circuitAge = now.Sub(time.Time{}) 
+			// log.Printf("AutoRotationMonitor: Instance %d LastCircuitRecreationTime is zero.", inst.InstanceID)
 		} else {
 			circuitAge = now.Sub(lastRecTime)
 		}
 
 		if circuitAge > appCfg.AutoRotateCircuitInterval {
-			// log.Printf("AutoRotationMonitor: Instance %d is eligible for auto-rotation. Age: %v, LastRec: %v", inst.InstanceID, circuitAge, lastRecTime) // Use inst.InstanceID
+			// log.Printf("AutoRotationMonitor: Instance %d is eligible for auto-rotation. Age: %v, LastRec: %v", inst.InstanceID, circuitAge, lastRecTime)
 			if instanceToRotate == nil || lastRecTime.Before(oldestRecreationTime) || (lastRecTime.IsZero() && !oldestRecreationTime.IsZero()) {
 				instanceToRotate = inst
-				oldestRecreationTime = lastRecTime // This will be zero if inst's lastRecTime is zero
-				// log.Printf("AutoRotationMonitor: Instance %d is current candidate for rotation.", inst.InstanceID) // Use inst.InstanceID
+				oldestRecreationTime = lastRecTime 
+				// log.Printf("AutoRotationMonitor: Instance %d is current candidate for rotation.", inst.InstanceID)
 			}
 		}
 	}
@@ -107,34 +98,29 @@ func processEligibleInstanceForAutoRotation(ctx context.Context, instances []*to
 		log.Printf("AutoRotationMonitor: Selected instance %d for automatic circuit rotation (Last recreation: %v, Age: ~%v).",
 			instanceToRotate.InstanceID, oldestRecreationTime, now.Sub(oldestRecreationTime))
 
-		// Perform rotation in a new goroutine to not block the monitor's ticker,
-		// and to handle the stagger delay before releasing the global lock.
 		go func(selectedInstance *torinstance.Instance) {
-			defer atomic.StoreInt32(&autoRotationInProgress, 0) // Release lock after this rotation attempt & stagger
+			defer atomic.StoreInt32(&autoRotationInProgress, 0) 
 
 			log.Printf("AutoRotationMonitor: Sending NEWNYM to instance %d.", selectedInstance.InstanceID)
-			_, err := selectedInstance.SendTorCommand("SIGNAL NEWNYM") // SendTorCommand updates LastCircuitRecreationTime on success
+			_, err := selectedInstance.SendTorCommand("SIGNAL NEWNYM") 
 
 			if err != nil {
 				log.Printf("AutoRotationMonitor: Error auto-rotating instance %d: %v", selectedInstance.InstanceID, err)
 			} else {
 				log.Printf("AutoRotationMonitor: Successfully sent NEWNYM to instance %d for auto-rotation.", selectedInstance.InstanceID)
-				// LastCircuitRecreationTime is updated within SendTorCommand
 			}
 
-			// Apply stagger delay before allowing another auto-rotation to be picked up
 			if appCfg.AutoRotateStaggerDelay > 0 {
 				// log.Printf("AutoRotationMonitor: Staggering for %v after rotating instance %d.", appCfg.AutoRotateStaggerDelay, selectedInstance.InstanceID)
 				select {
-				case <-time.After(appCfg.AutoRotateStaggerDelay):
-				case <-ctx.Done(): // If main context is cancelled during stagger
+				case <-time.After(appCfg.AutoRotateStaggerDelay): // This is line 110
+				case <-ctx.Done(): 
 					log.Printf("AutoRotationMonitor: Stagger delay for instance %d interrupted by shutdown.", selectedInstance.InstanceID)
 					return
 				}
 			}
 		}(instanceToRotate)
 	} else {
-		// No instance was eligible or selected, release the lock immediately.
 		atomic.StoreInt32(&autoRotationInProgress, 0)
 		// log.Println("AutoRotationMonitor: No instances currently eligible for auto-rotation.")
 	}

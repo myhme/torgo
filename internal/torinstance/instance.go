@@ -20,6 +20,51 @@ import (
 	"torgo/internal/config"
 )
 
+// maskIP partially hides an IP address for logging.
+// Example: 1.2.3.4 -> 1.2.x.x
+// Example: 2001:db8::1 -> 2001:db8:x:x
+func maskIP(ipAddress string) string {
+	ip := net.ParseIP(ipAddress)
+	if ip == nil {
+		return "invalid_ip"
+	}
+
+	if ip.To4() != nil {
+		parts := strings.Split(ipAddress, ".")
+		if len(parts) == 4 {
+			return fmt.Sprintf("%s.%s.x.x", parts[0], parts[1])
+		}
+	} else { // IPv6
+		parts := strings.Split(ipAddress, ":")
+		if len(parts) > 2 { // Ensure there are enough parts to mask
+			maskedParts := []string{}
+			for i, part := range parts {
+				if i < 2 { // Keep the first two parts
+					maskedParts = append(maskedParts, part)
+				} else {
+					// For simplicity in this example, just replace remaining with 'x'
+					// A more robust IPv6 masker might preserve more structure if needed
+					// but for logging, this should suffice.
+					if len(maskedParts) < 4 { // Show up to 4 segments, rest are 'x'
+						maskedParts = append(maskedParts, "x")
+					}
+				}
+			}
+			// Ensure we don't have too many 'x's if original was short
+			finalParts := []string{}
+			for i:=0; i<len(parts) && i < 4; i++ {
+				if i < len(maskedParts) {
+					finalParts = append(finalParts, maskedParts[i])
+				} else {
+					finalParts = append(finalParts, "x") // Should not happen if logic above is correct
+				}
+			}
+			return strings.Join(finalParts, ":")
+		}
+	}
+	return "ip_mask_failed" // Fallback
+}
+
 // Instance represents a single backend Tor process and its state.
 type Instance struct {
 	InstanceID       int
@@ -55,9 +100,6 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 	socksPort := appCfg.SocksBasePort + id
 	dnsPort := appCfg.DNSBasePort + id
 
-	// Initialize time fields to a zero value, or distant past if preferred for logic
-	// Zero time is fine for checks like `IsZero()` or `time.Since(t) > interval`
-	// where a very large duration for uninitialized times is acceptable.
 	initialTime := time.Time{}
 
 	ti := &Instance{
@@ -68,8 +110,8 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 		AuthCookiePath:            fmt.Sprintf("/var/lib/tor/instance%d/control_auth_cookie", id),
 		DataDir:                   fmt.Sprintf("/var/lib/tor/instance%d", id),
 		IsHealthy:                 false,
-		LastCircuitRecreationTime: initialTime, // Initialize
-		LastIPChangeTime:          initialTime, // Initialize
+		LastCircuitRecreationTime: initialTime,
+		LastIPChangeTime:          initialTime,
 		appConfig:                 appCfg,
 	}
 	ti.Mu.Lock()
@@ -79,7 +121,6 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 }
 
 func (ti *Instance) loadAndCacheControlCookieUnlocked(forceReload bool) error {
-	// Assumes ti.Mu is locked
 	if ti.controlCookieHex != "" && !forceReload {
 		return nil
 	}
@@ -93,7 +134,6 @@ func (ti *Instance) loadAndCacheControlCookieUnlocked(forceReload bool) error {
 }
 
 func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, error) {
-	// Assumes ti.Mu is locked
 	if err := ti.loadAndCacheControlCookieUnlocked(false); err != nil {
 		return nil, nil, fmt.Errorf("instance %d: pre-connect cookie load failed: %w", ti.InstanceID, err)
 	}
@@ -196,17 +236,20 @@ func (ti *Instance) SendTorCommand(command string) (string, error) {
 			if errRead != nil {
 				conn.SetReadDeadline(time.Time{})
 				ti.CloseControlConnUnlocked()
+				responseStrPartial := strings.TrimSpace(responseBuffer.String())
 				if errRead == io.EOF && responseBuffer.Len() > 0 {
-					// Successfully read something before EOF
-					responseStr := strings.TrimSpace(responseBuffer.String())
-					if strings.HasPrefix(command, "SIGNAL NEWNYM") && strings.HasPrefix(responseStr, "250 OK") {
-						ti.LastCircuitRecreationTime = time.Now()
+					if strings.HasPrefix(command, "SIGNAL NEWNYM") {
+						log.Printf("Instance %d: NEWNYM command (EOF read). Response received: '%s'. Will update LastCircuitRecreationTime: %v", ti.InstanceID, responseStrPartial, strings.HasPrefix(responseStrPartial, "250 OK"))
+						if strings.HasPrefix(responseStrPartial, "250 OK") {
+							ti.LastCircuitRecreationTime = time.Now()
+							log.Printf("Instance %d: LastCircuitRecreationTime updated to %v (EOF path)", ti.InstanceID, ti.LastCircuitRecreationTime)
+						}
 					}
-					return responseStr, nil
+					return responseStrPartial, nil
 				}
 				if attempt == 0 {
 					break
-				} // Break from inner read loop, will go to next attempt
+				}
 				return responseBuffer.String(), fmt.Errorf("instance %d: failed to read full response for '%s': %w. Partial: '%s'", ti.InstanceID, command, errRead, responseBuffer.String())
 			}
 			responseBuffer.WriteString(line)
@@ -215,30 +258,33 @@ func (ti *Instance) SendTorCommand(command string) (string, error) {
 			isOK := strings.HasPrefix(trimmedLine, "250 OK")
 			is250NotMulti := strings.HasPrefix(trimmedLine, "250 ") && !strings.HasPrefix(trimmedLine, "250-")
 
-			if (isOK || (is250NotMulti && !isMultiLine)) {
+			if isOK || (is250NotMulti && !isMultiLine) {
 				responseStr := strings.TrimSpace(responseBuffer.String())
-				if strings.HasPrefix(command, "SIGNAL NEWNYM") && strings.HasPrefix(responseStr, "250 OK") {
-					ti.LastCircuitRecreationTime = time.Now()
-					// log.Printf("Instance %d: NEWNYM successful, LastCircuitRecreationTime updated to %v", ti.InstanceID, ti.LastCircuitRecreationTime)
+				if strings.HasPrefix(command, "SIGNAL NEWNYM") {
+					log.Printf("Instance %d: NEWNYM command. Response received: '%s'. Will update LastCircuitRecreationTime: %v", ti.InstanceID, responseStr, strings.HasPrefix(responseStr, "250 OK"))
+					if strings.HasPrefix(responseStr, "250 OK") {
+						ti.LastCircuitRecreationTime = time.Now()
+						log.Printf("Instance %d: LastCircuitRecreationTime updated to %v", ti.InstanceID, ti.LastCircuitRecreationTime)
+					}
 				}
 				return responseStr, nil
 			}
 
-			if strings.HasPrefix(trimmedLine, "5") { // Tor error
+			if strings.HasPrefix(trimmedLine, "5") {
 				if strings.HasPrefix(trimmedLine, "515") {
 					log.Printf("Instance %d: Received Tor error 515 for '%s'. Invalidating cookie for retry. Full error: %s", ti.InstanceID, command, trimmedLine)
 					ti.controlCookieHex = ""
 				}
 				if attempt == 0 {
 					break
-				} // Break from inner read loop
+				}
 				return strings.TrimSpace(responseBuffer.String()), fmt.Errorf("tor error: %s", trimmedLine)
 			}
 		}
 		conn.SetReadDeadline(time.Time{})
 		if attempt == 0 {
 			continue
-		} // Go to next attempt in outer loop
+		}
 	}
 	return "", fmt.Errorf("instance %d: SendTorCommand exhausted retries for command '%s'", ti.InstanceID, command)
 }
@@ -254,8 +300,6 @@ func (ti *Instance) CheckHealth(ctx context.Context) bool {
 	ch := make(chan result, 1)
 
 	go func() {
-		// Use a non-locking version or handle lock carefully if SendTorCommand itself locks.
-		// SendTorCommand already handles its own locking.
 		resp, err := ti.SendTorCommand("GETINFO status/bootstrap-phase")
 		ch <- result{resp, err}
 	}()
@@ -347,21 +391,25 @@ func (ti *Instance) GetHTTPClient() *http.Client {
 	return ti.httpClient
 }
 
-// SetExternalIP updates the instance's last known external IP and check time.
-// It also updates LastIPChangeTime if the IP has actually changed.
 func (ti *Instance) SetExternalIP(newIP string) {
 	ti.Mu.Lock()
 	defer ti.Mu.Unlock()
 
+	maskedNewIP := maskIP(newIP)
+	maskedCurrentIP := maskIP(ti.ExternalIP)
+
+	log.Printf("Instance %d: SetExternalIP called with newIP (masked)='%s'. Current ti.ExternalIP (masked)='%s'", ti.InstanceID, maskedNewIP, maskedCurrentIP)
 	if ti.ExternalIP != newIP {
-		// log.Printf("Instance %d: External IP changed from '%s' to '%s'", ti.InstanceID, ti.ExternalIP, newIP)
+		log.Printf("Instance %d: External IP changing from (masked) '%s' to (masked) '%s'. Updating LastIPChangeTime.", ti.InstanceID, maskedCurrentIP, maskedNewIP)
 		ti.ExternalIP = newIP
 		ti.LastIPChangeTime = time.Now()
+		log.Printf("Instance %d: LastIPChangeTime updated to %v", ti.InstanceID, ti.LastIPChangeTime)
+	} else {
+		log.Printf("Instance %d: newIP (masked) '%s' is same as current ti.ExternalIP (masked) '%s'. LastIPChangeTime not updated.", ti.InstanceID, maskedNewIP, maskedCurrentIP)
 	}
 	ti.LastIPCheck = time.Now()
 }
 
-// GetExternalIPInfo returns the last known external IP, last check time, and last change time.
 func (ti *Instance) GetExternalIPInfo() (ip string, lastCheck time.Time, lastChange time.Time) {
 	ti.Mu.Lock()
 	defer ti.Mu.Unlock()
