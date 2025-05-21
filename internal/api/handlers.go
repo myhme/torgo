@@ -28,6 +28,7 @@ func firstNChars(s string, n int) string {
 	return s
 }
 
+// WebUIHandler serves the embedded web UI.
 func WebUIHandler(w http.ResponseWriter, r *http.Request) {
 	htmlContent, err := webUIContent.ReadFile("webui.html")
 	if err != nil {
@@ -39,9 +40,9 @@ func WebUIHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(htmlContent)
 }
 
+// AppDetailsHandler provides application configuration details.
 func AppDetailsHandler(appCfg *config.AppConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// ... (details map remains the same)
 		details := map[string]interface{}{
 			"num_instances":             appCfg.NumTorInstances,
 			"common_socks_port":         appCfg.CommonSocksPort,
@@ -68,7 +69,9 @@ func AppDetailsHandler(appCfg *config.AppConfig) http.HandlerFunc {
 	}
 }
 
-func rotateAllStaggeredHandler(instances []*torinstance.Instance, appCfg *config.AppConfig) http.HandlerFunc {
+// RotateAllStaggeredHandler handles requests to rotate all healthy Tor circuits.
+// Renamed from rotateAllStaggeredHandler to be exported.
+func RotateAllStaggeredHandler(instances []*torinstance.Instance, appCfg *config.AppConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !atomic.CompareAndSwapInt32(&appCfg.IsGlobalRotationActive, 0, 1) {
 			slog.Warn("API: Staggered rotation request denied, another is active.", "remote_addr", r.RemoteAddr)
@@ -153,11 +156,11 @@ func rotateAllStaggeredHandler(instances []*torinstance.Instance, appCfg *config
 	}
 }
 
+// getInstanceFromRequest extracts the Tor instance based on path parameter.
 func getInstanceFromRequest(r *http.Request, instances []*torinstance.Instance) (*torinstance.Instance, error) {
 	instanceIDStr := r.PathValue("instanceid") 
-	instanceID, err := strconv.Atoi(instanceIDStr) // PathValue gives just the number if pattern is {instanceid}
-	if err != nil { // If instanceid was "tor1", Atoi would fail. Adjust pattern or parsing.
-		// Assuming pattern is /instance/{id}/ where id is numeric
+	instanceID, err := strconv.Atoi(instanceIDStr) 
+	if err != nil { 
 		return nil, fmt.Errorf("invalid Tor instance ID in path (must be numeric): %s", instanceIDStr)
 	}
 	if instanceID < 1 || instanceID > len(instances) {
@@ -166,6 +169,7 @@ func getInstanceFromRequest(r *http.Request, instances []*torinstance.Instance) 
 	return instances[instanceID-1], nil
 }
 
+// InstanceActionHandler creates a handler for a specific action on a Tor instance.
 func InstanceActionHandler(instances []*torinstance.Instance, appCfg *config.AppConfig,
 	actionFunc func(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +183,11 @@ func InstanceActionHandler(instances []*torinstance.Instance, appCfg *config.App
 	}
 }
 
-func handleRotate(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
+// Specific action functions to be wrapped by InstanceActionHandler
+
+// HandleRotate handles requests to rotate a specific Tor instance's circuit.
+// Renamed from handleRotate to be exported.
+func HandleRotate(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
 	response, err := instance.SendTorCommand("SIGNAL NEWNYM", true)
 	if err != nil {
 		slog.Error("API: Failed to rotate instance.", "instance_id", instance.InstanceID, slog.Any("error", err))
@@ -190,8 +198,9 @@ func handleRotate(w http.ResponseWriter, r *http.Request, instance *torinstance.
 	fmt.Fprintf(w, "Instance %d NEWNYM: %s", instance.InstanceID, response)
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
-	// ... (logic remains the same, slog calls would be inside CheckHealth or instance methods)
+// HandleHealth handles requests to get the health status of a specific Tor instance.
+// Renamed from handleHealth to be exported.
+func HandleHealth(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
 	liveHealthy := instance.CheckHealth(r.Context())
 	instance.Mu.Lock()
 	cachedHealthy := instance.IsHealthy
@@ -208,8 +217,9 @@ func handleHealth(w http.ResponseWriter, r *http.Request, instance *torinstance.
 	json.NewEncoder(w).Encode(respData)
 }
 
-func handleStats(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
-	// ... (logic remains the same, slog calls would be inside SendTorCommand)
+// HandleStats handles requests to get statistics from a specific Tor instance.
+// Renamed from handleStats to be exported.
+func HandleStats(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
 	version, vErr := instance.SendTorCommand("GETINFO version", false)
 	bootstrap, bErr := instance.SendTorCommand("GETINFO status/bootstrap-phase", false)
 	trafficRead, trErr := instance.SendTorCommand("GETINFO traffic/read", false)
@@ -227,7 +237,9 @@ func handleStats(w http.ResponseWriter, r *http.Request, instance *torinstance.I
 	json.NewEncoder(w).Encode(statsData)
 }
 
-func handleIP(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
+// HandleIP handles requests to get the external IP address of a specific Tor instance.
+// Renamed from handleIP to be exported.
+func HandleIP(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
 	client := instance.GetHTTPClient()
 	if client == nil {
 		slog.Error("API: HTTP client not ready for instance.", "instance_id", instance.InstanceID)
@@ -278,8 +290,9 @@ func handleIP(w http.ResponseWriter, r *http.Request, instance *torinstance.Inst
 	}
 }
 
-func handleGetInstanceConfig(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
-	// ... (logic remains the same, slog calls inside GetTorNodePolicies)
+// HandleGetInstanceConfig handles requests to get configuration details of a specific Tor instance.
+// Renamed from handleGetInstanceConfig to be exported.
+func HandleGetInstanceConfig(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
 	instance.Mu.Lock()
 	liveNodePolicies, errNP := instance.GetTorNodePolicies()
 	if errNP != nil {
@@ -311,7 +324,9 @@ func handleGetInstanceConfig(w http.ResponseWriter, r *http.Request, instance *t
 	json.NewEncoder(w).Encode(cfgData)
 }
 
-func handleSetInstancePortConfig(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
+// HandleSetInstancePortConfig handles requests to set port configurations for a specific Tor instance.
+// Renamed from handleSetInstancePortConfig to be exported.
+func HandleSetInstancePortConfig(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
 	subAction := r.PathValue("porttype") 
 	var reqBody struct { Address string `json:"address"`; Port int `json:"port"` }
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
@@ -326,7 +341,6 @@ func handleSetInstancePortConfig(w http.ResponseWriter, r *http.Request, instanc
 		http.Error(w, "Invalid port number.", http.StatusBadRequest)
 		return
 	}
-	// ... (rest of logic, replacing log with slog)
 	newPortStr := strconv.Itoa(reqBody.Port)
 	listenAddress := "127.0.0.1"
 	if reqBody.Address != "" { listenAddress = reqBody.Address }
@@ -373,7 +387,9 @@ func handleSetInstancePortConfig(w http.ResponseWriter, r *http.Request, instanc
 	fmt.Fprintf(w, "API internal state for instance %d updated.\n", instance.InstanceID)
 }
 
-func handleSetNodePolicy(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
+// HandleSetNodePolicy handles requests to set node policies for a specific Tor instance.
+// Renamed from handleSetNodePolicy to be exported.
+func HandleSetNodePolicy(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
 	var policyReq struct { PolicyType string `json:"policy_type"`; Nodes string `json:"nodes"`}
 	if err := json.NewDecoder(r.Body).Decode(&policyReq); err != nil {
 		slog.Warn("API: Invalid JSON for node policy.", "instance_id", instance.InstanceID, "error", err.Error(), "remote_addr", r.RemoteAddr)
@@ -398,11 +414,14 @@ func handleSetNodePolicy(w http.ResponseWriter, r *http.Request, instance *torin
 	fmt.Fprintf(w, "Instance %d: Node policy %s set to '%s'. Tor response: %s", instance.InstanceID, policyReq.PolicyType, policyReq.Nodes, response)
 }
 
-func handleGetPerformanceMetrics(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
+// HandleGetPerformanceMetrics handles requests to get performance metrics for a specific Tor instance.
+// Renamed from handleGetPerformanceMetrics to be exported.
+func HandleGetPerformanceMetrics(w http.ResponseWriter, r *http.Request, instance *torinstance.Instance, appCfg *config.AppConfig) {
 	metrics := instance.GetPerfMetrics()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(metrics)
 }
+
 
 func fmtError(err error) string {
 	if err == nil {

@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog" // Import slog
 	"net"
+	"os" // Import os for os.Exit
 	"strconv"
 	"strings"
 	"time"

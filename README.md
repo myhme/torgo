@@ -2,11 +2,12 @@
 
 **torgo** is a Go application designed to manage multiple backend Tor instances, providing a unified SOCKS5 and DNS proxy interface with configurable load balancing. It also exposes an HTTP API for fine-grained control over individual Tor instances, including circuit rotation, health checks, and statistics, along with a Web UI for monitoring and basic control.
 
-**New in v3 (Highlights - this README needs a full update):**
-* **Unified Circuit Manager**: Combines previous auto-rotation (circuit age) and IP diversity logic into a single, more intelligent component.
-* **Performance Metrics**: Periodically tests each Tor instance for latency (to Google, Cloudflare) and light download speed (Cloudflare).
-* **WebUI Enhancements**: Displays performance metrics and allows configuration of Tor Exit Node policies (country whitelisting/blacklisting) per instance.
-* **Configurable Load Balancing**: Supports "random", "round-robin", and "least-connections-proxy" strategies.
+**Key Features:**
+* **Unified Circuit Manager**: Combines circuit age-based rotation and IP diversity logic.
+* **Performance Metrics**: Periodically tests each Tor instance for latency and light download speed.
+* **WebUI Enhancements**: Displays performance metrics and allows configuration of Tor Exit Node policies.
+* **Configurable Load Balancing**: Supports "random", "round-robin", and "least-connections-proxy".
+* **Structured Logging**: Uses `log/slog` for structured, configurable logging (JSON/text, levels).
 * More environment variables for fine-tuning these new features.
 
 ## Features (Existing & Enhanced)
@@ -26,7 +27,7 @@
     * View performance metrics (latency, speed).
     * Configure ExitNode and ExcludeNode policies per instance.
 * **Dockerized**: Easy deployment with Docker and Docker Compose.
-* **Highly Configurable**: Via environment variables.
+* **Highly Configurable**: Via environment variables, including logging.
 
 ## Project Structure (Simplified for v3)
 
@@ -73,6 +74,8 @@ Key environment variables (see `docker-compose.yml` and `internal/config/config.
 * `TOR_INSTANCES`: Number of backend Tor instances.
 * `API_PORT`, `COMMON_SOCKS_PROXY_PORT`, `COMMON_DNS_PROXY_PORT`.
 * `LOAD_BALANCING_STRATEGY`: `random`, `round-robin`, `least-connections-proxy`.
+* `LOG_LEVEL`: `debug`, `info`, `warn`, `error`.
+* `LOG_FORMAT`: `text`, `json`.
 * `CIRCUIT_MANAGER_ENABLED`: `true` or `false`.
 * `CIRCUIT_MAX_AGE_SECONDS`: Max age for circuits before rotation (0 to disable).
 * `IP_DIVERSITY_ENABLED`: `true` or `false` (within CircuitManager).
@@ -92,24 +95,24 @@ The management API listens on `http://localhost:<API_PORT>`.
 
 ### Global Endpoints
 
-* **`GET` `/api/v1/app-details`**: Application configuration.
+* **`GET /api/v1/app-details`**: Application configuration.
 * **`POST` or `GET` `/api/v1/rotate-all-staggered`**: Manually rotate all healthy circuits.
 
-### Per-Instance Endpoints (`<id>` = `tor1`, `tor2`, ...)
+### Per-Instance Endpoints (`<id>` is the numeric instance ID, e.g., `1`, `2`)
 
-* **`POST` or `GET` `/api/v1/<id>/rotate`**: New circuit for the instance.
-* **`GET` `/api/v1/<id>/health`**: Health status.
-* **`GET` `/api/v1/<id>/stats`**: Tor statistics.
-* **`GET` `/api/v1/<id>/ip`**: External IP.
-* **`GET` `/api/v1/<id>/config`**: Instance configuration, including current node policies.
-* **`POST` `/api/v1/<id>/config/nodepolicy`**: Set node policies (ExitNodes, ExcludeNodes, EntryNodes).
+* **`POST` or `GET` `/api/v1/instance/<id>/rotate`**: New circuit for the instance.
+* **`GET /api/v1/instance/<id>/health`**: Health status.
+* **`GET /api/v1/instance/<id>/stats`**: Tor statistics.
+* **`GET /api/v1/instance/<id>/ip`**: External IP.
+* **`GET /api/v1/instance/<id>/config`**: Instance configuration, including current node policies.
+* **`POST /api/v1/instance/<id>/config/nodepolicy`**: Set node policies (ExitNodes, ExcludeNodes, EntryNodes).
     * JSON Body: `{"policy_type": "ExitNodes", "nodes": "{us},{ca}"}` or `{"policy_type": "ExcludeNodes", "nodes": "{ru}"}`. Empty `nodes` clears.
-* **`GET` `/api/v1/<id>/performancemetrics`**: Get stored latency and speed test results.
-* **`POST` `/api/v1/<id>/config/socksport` / `dnsport` / `controlport`**: Dynamically change backend ports (use with caution).
+* **`GET /api/v1/instance/<id>/performancemetrics`**: Get stored latency and speed test results.
+* **`POST /api/v1/instance/<id>/config/<porttype>`**: (`porttype` = `socksport`, `dnsport`, `controlport`) Dynamically change backend ports.
 
 ## Development
 
-* Go (1.20+ recommended).
+* Go (1.24+ recommended).
 * Run `go mod tidy`.
 * The `webui.html` is self-contained.
 
@@ -117,6 +120,3 @@ The management API listens on `http://localhost:<API_PORT>`.
 
 ```bash
 docker-compose down
-```
-
-**Note:** This README needs to be fully updated to detail the CircuitManager, performance testing, and advanced WebUI controls.

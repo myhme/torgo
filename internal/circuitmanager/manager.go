@@ -436,7 +436,8 @@ func (cm *CircuitManager) fetchAndUpdateInstanceIP(instance *torinstance.Instanc
 		if net.ParseIP(trimmedBody) != nil {
 			instance.SetExternalIP(trimmedBody)
 		} else {
-			slog.Debug("CircuitManager: IP response not valid JSON or plain IP.", "instance_id", instance.InstanceID, "response_preview", torinstance.firstNChars(trimmedBody, 30))
+			// Use the exported function from torinstance package
+			slog.Debug("CircuitManager: IP response not valid JSON or plain IP.", "instance_id", instance.InstanceID, "response_preview", torinstance.FirstNChars(trimmedBody, 30))
 		}
 	}
 }
