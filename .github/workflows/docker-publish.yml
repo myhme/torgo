@@ -15,6 +15,15 @@ on:
       - main
       - beta
 
+  # Triggers the workflow on a schedule
+  schedule:
+    # Runs every Sunday at 00:00 UTC
+    # You can adjust the cron syntax as needed.
+    # Cron syntax: minute hour day-of-month month day-of-week
+    # Example: '0 0 * * 0' means at 00:00 on Sunday.
+    # Example: '0 2 * * 1' means at 02:00 on Monday.
+    - cron: '0 2 * * 4'
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
