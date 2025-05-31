@@ -10,7 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url" // Used by GetHTTPClient if proxyURL was needed, but not directly in initializeHTTPClientUnlocked
+	// "net/url" // Removed: imported and not used
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,19 +105,14 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 
 // Getters for host strings
 func (ti *Instance) GetControlHost() string {
-	// These are set at init and don't change, so lock isn't strictly needed for read,
-	// but can be kept for consistency if other fields might change.
-	// ti.mu.Lock(); defer ti.mu.Unlock();
 	return ti.controlHost
 }
 
 func (ti *Instance) GetBackendSocksHost() string {
-	// ti.mu.Lock(); defer ti.mu.Unlock();
 	return ti.backendSocksHost
 }
 
 func (ti *Instance) GetBackendDNSHost() string {
-	// ti.mu.Lock(); defer ti.mu.Unlock();
 	return ti.backendDNSHost
 }
 
@@ -307,11 +302,7 @@ func (ti *Instance) GetHealthStatus() (isHealthy bool, lastCheck time.Time, cons
 }
 func (ti *Instance) IsCurrentlyHealthy() bool { ti.mu.Lock(); defer ti.mu.Unlock(); return ti.isHealthy }
 
-// initializeHTTPClientUnlocked initializes or re-initializes the SOCKS5 HTTP client.
-// Must be called with ti.mu locked if called outside of New(), or if ti is being constructed.
 func (ti *Instance) initializeHTTPClientUnlocked() {
-	// log.Printf("Instance %d: Initializing HTTP client for SOCKS proxy %s", ti.InstanceID, ti.backendSocksHost)
-
 	contextDialer, err := proxy.SOCKS5("tcp", ti.backendSocksHost, nil, &net.Dialer{
 		Timeout:   ti.appConfig.SocksTimeout, 
 		KeepAlive: 30 * time.Second,          
@@ -324,12 +315,6 @@ func (ti *Instance) initializeHTTPClientUnlocked() {
 
 	httpTransport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// The contextDialer (proxy.Dialer) does not take context in its Dial method.
-			// The timeout for dialing the SOCKS proxy itself is handled by the net.Dialer above.
-			// The overall request timeout is handled by http.Client.Timeout.
-			// For cancellation during the dial to the *target* via SOCKS,
-			// one would typically need the SOCKS dialer itself to be context-aware.
-			// However, for this setup, the primary context control is via http.Client.Timeout.
 			return contextDialer.Dial(network, addr)
 		},
 		MaxIdleConns:          100,
@@ -349,8 +334,7 @@ func (ti *Instance) ReinitializeHTTPClient() {
 	log.Printf("Instance %d: HTTP client re-initialized.", ti.InstanceID)
 }
 func (ti *Instance) GetHTTPClient() *http.Client {
-	ti.mu.Lock(); defer ti.mu.Unlock()
-	if ti.httpClient == nil { ti.initializeHTTPClientUnlocked() }
+	ti.mu.Lock(); defer ti.mu.Unlock(); if ti.httpClient == nil { ti.initializeHTTPClientUnlocked() }
 	return ti.httpClient
 }
 func (ti *Instance) SetExternalIP(newIP string, checkTime time.Time) {
