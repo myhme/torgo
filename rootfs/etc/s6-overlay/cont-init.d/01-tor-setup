@@ -3,11 +3,9 @@
 # and listing all user services for S6.
 
 set -e # Exit on error
+set -o pipefail # Causes pipelines to fail if any command fails
 
 echo "--- S6 Cont-init: 01-tor-setup starting ---"
-
-# Source S6 environment variables (passed from Docker ENV)
-# TOR_INSTANCES, SOCKS_BASE_PORT_CONFIGURED, etc. are available directly.
 
 # Defaults (should match Go config defaults if ENV not set)
 TOR_INSTANCES_DEFAULT=1
@@ -17,13 +15,13 @@ DNS_BASE_PORT_DEFAULT=9200
 
 TOR_USER="_tor"
 TOR_DATA_BASE_DIR="/var/lib/tor"
-TOR_RUN_DIR="/var/run/tor"
+TOR_RUN_DIR="/var/run/tor" # Tor might not use this if not daemonized by S6
 TORRC_TEMPLATE="/etc/tor/torrc.template"
 TORRC_DIR="/etc/tor"
 
 # Ensure _tor user and group exist (apk add tor should create them)
-if ! getent group _tor > /dev/null; then addgroup -S _tor; fi
-if ! getent passwd _tor > /dev/null; then adduser -S -G _tor -h /var/lib/tor -s /sbin/nologin _tor; fi
+if ! getent group _tor > /dev/null; then echo "Creating group _tor"; addgroup -S _tor; fi
+if ! getent passwd _tor > /dev/null; then echo "Creating user _tor"; adduser -S -G _tor -h /var/lib/tor -s /sbin/nologin _tor; fi
 
 mkdir -p "${TOR_RUN_DIR}" "${TOR_DATA_BASE_DIR}" "${TORRC_DIR}"
 chown _tor:_tor "${TOR_RUN_DIR}" "${TOR_DATA_BASE_DIR}"
@@ -39,18 +37,18 @@ SOCKS_BASE=${SOCKS_BASE_PORT_CONFIGURED:-$SOCKS_BASE_PORT_DEFAULT}
 CONTROL_BASE=${CONTROL_BASE_PORT_CONFIGURED:-$CONTROL_BASE_PORT_DEFAULT}
 DNS_BASE=${DNS_BASE_PORT_CONFIGURED:-$DNS_BASE_PORT_DEFAULT}
 
-# File to list ALL user-level S6 services.
-# This single file will contain svc-torgo-app, svc-privoxy, AND all svc-tor-instanceXX
-USER_SERVICES_LIST_FILE="/etc/s6-overlay/s6-rc.d/user/contents.d/all-user-services"
-mkdir -p "$(dirname "${USER_SERVICES_LIST_FILE}")" # Ensure the contents.d directory exists
-rm -f "${USER_SERVICES_LIST_FILE}" # Clear if exists from a previous run
-touch "${USER_SERVICES_LIST_FILE}"
-chmod 644 "${USER_SERVICES_LIST_FILE}"
+USER_SERVICES_CONTENTS_DIR="/etc/s6-overlay/s6-rc.d/user/contents.d"
+mkdir -p "${USER_SERVICES_CONTENTS_DIR}"
+ALL_USER_SERVICES_FILE="${USER_SERVICES_CONTENTS_DIR}/all-user-services"
+
+rm -f "${ALL_USER_SERVICES_FILE}" # Clear if exists
+touch "${ALL_USER_SERVICES_FILE}"
+chmod 644 "${ALL_USER_SERVICES_FILE}"
 
 # Add core static services to the list
-echo "svc-torgo-app" >> "${USER_SERVICES_LIST_FILE}"
-echo "svc-privoxy" >> "${USER_SERVICES_LIST_FILE}"
-echo "--- S6 Cont-init: Added core services (svc-torgo-app, svc-privoxy) to ${USER_SERVICES_LIST_FILE} ---"
+echo "svc-torgo-app" >> "${ALL_USER_SERVICES_FILE}"
+echo "svc-privoxy" >> "${ALL_USER_SERVICES_FILE}"
+echo "--- S6 Cont-init: Added core services (svc-torgo-app, svc-privoxy) to ${ALL_USER_SERVICES_FILE} ---"
 
 echo "--- S6 Cont-init: Setting up ${N_INSTANCES} Tor S6 services ---"
 
@@ -81,26 +79,42 @@ for i in $(seq 1 "${N_INSTANCES}"); do
   chmod 644 "${TORRC_FILE}"
 
   INSTANCE_SERVICE_DIR_PATH="/etc/s6-overlay/s6-rc.d/${INSTANCE_S6_SERVICE_NAME}"
-  mkdir -p "${INSTANCE_SERVICE_DIR_PATH}/data"
+  mkdir -p "${INSTANCE_SERVICE_DIR_PATH}/data" # For any persistent service data if needed by S6 for this service
+  mkdir -p "${INSTANCE_SERVICE_DIR_PATH}/log"   # For the log service
 
+  # Create the run script for this Tor instance S6 service
   cat <<RUNNER > "${INSTANCE_SERVICE_DIR_PATH}/run"
 #!/command/execlineb -P
 foreground { echo "--- S6: Starting Tor instance ${i} (config: ${TORRC_FILE}) ---" }
+# Tor should not daemonize itself; S6 handles that.
+# The torrc file should have 'Log notice stdout' or similar.
 su-exec _tor tor -f ${TORRC_FILE}
 RUNNER
   chmod +x "${INSTANCE_SERVICE_DIR_PATH}/run"
 
+  # Create an optional finish script
   cat <<FINISHER > "${INSTANCE_SERVICE_DIR_PATH}/finish"
 #!/usr/bin/execlineb -P
+# \$1 is the exit code, \$2 is the signal number (if any)
 foreground { echo "--- S6: Tor instance ${i} stopped. Exit code: \$1, Signal: \$2 ---" }
+# Prevent rapid flapping if Tor crashes immediately on startup
 sleep 2
 FINISHER
   chmod +x "${INSTANCE_SERVICE_DIR_PATH}/finish"
 
+  # Create the log run script for this Tor instance
+  cat <<LOGRUNNER > "${INSTANCE_SERVICE_DIR_PATH}/log/run"
+#!/bin/sh
+# Simple logger: pipe service stdout/stderr to this script's stdout (which Docker captures)
+exec cat
+LOGRUNNER
+  chmod +x "${INSTANCE_SERVICE_DIR_PATH}/log/run"
+
+  # Tell S6 to manage this service (longrun service)
   touch "${INSTANCE_SERVICE_DIR_PATH}/up"
 
   # Add this dynamically created Tor service name to the list
-  echo "${INSTANCE_S6_SERVICE_NAME}" >> "${USER_SERVICES_LIST_FILE}"
+  echo "${INSTANCE_S6_SERVICE_NAME}" >> "${ALL_USER_SERVICES_FILE}"
 done
 
 echo "--- S6 Cont-init: Waiting for all Tor control cookies ---"
@@ -133,8 +147,8 @@ if [ "${ALL_COOKIES_READY}" -eq 0 ]; then
 fi
 
 echo "--- S6 Cont-init: All Tor control cookies found. Tor setup complete. ---"
-echo "--- S6 Cont-init: Final user services list in ${USER_SERVICES_LIST_FILE}: ---"
-cat "${USER_SERVICES_LIST_FILE}"
+echo "--- S6 Cont-init: Final user services list in ${ALL_USER_SERVICES_FILE}: ---"
+cat "${ALL_USER_SERVICES_FILE}"
 echo "----------------------------------------------------------------------"
 
 exit 0

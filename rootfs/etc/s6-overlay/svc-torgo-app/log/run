@@ -1,0 +1,3 @@
+#!/bin/sh
+# Simple S6 logger for torgo-app: pipe service stdout/stderr to this script's stdout
+exec cat

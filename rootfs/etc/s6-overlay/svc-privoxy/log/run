@@ -1,0 +1,4 @@
+#!/bin/sh
+# Simple S6 logger for Privoxy: pipe service stdout/stderr to this script's stdout
+# This output will then be captured by Docker logs.
+exec cat
