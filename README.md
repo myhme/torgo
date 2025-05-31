@@ -1,55 +1,80 @@
-# torgo: Multi-Instance Tor Controller & Load Balancing Proxy
+# torgo: Advanced Multi-Instance Tor Controller, SOCKS/DNS/HTTP Proxy, and Privacy Enhancer
 
-**torgo** is a Go application designed to manage multiple backend Tor instances, providing a unified SOCKS5 and DNS proxy interface with configurable load balancing. It also exposes an HTTP API for fine-grained control over individual Tor instances, including circuit rotation, health checks, and statistics, along with a Web UI for monitoring and basic control.
+**torgo** is a Go application designed to manage multiple backend Tor instances. It provides unified SOCKS5 and DNS proxy interfaces with load balancing, an HTTP API for fine-grained control, a Web UI for monitoring, and includes features like automatic circuit rotation, IP diversity management, and DNS caching. It also bundles Privoxy for easy HTTP-to-SOCKS5 bridging, facilitating selective Tor routing when combined with an external reverse proxy.
 
-**New in v3 (Highlights - this README needs a full update):**
-* **Unified Circuit Manager**: Combines previous auto-rotation (circuit age) and IP diversity logic into a single, more intelligent component.
-* **Performance Metrics**: Periodically tests each Tor instance for latency (to Google, Cloudflare) and light download speed (Cloudflare).
-* **WebUI Enhancements**: Displays performance metrics and allows configuration of Tor Exit Node policies (country whitelisting/blacklisting) per instance.
-* **Configurable Load Balancing**: Supports "random", "round-robin", and "least-connections-proxy" strategies.
-* More environment variables for fine-tuning these new features.
+## Features
 
-## Features (Existing & Enhanced)
+* **Multiple Backend Tor Instances**: Run and manage `N` independent Tor processes, configurable at startup. \
+* **Common SOCKS5 Proxy**: A single entry point (default: `0.0.0.0:9000`) that load balances SOCKS5 connections across healthy backend Tor instances. \
+* **Common DNS Proxy**:
+    * A single entry point (default: `0.0.0.0:5300`) that load balances DNS queries across healthy backend Tor instances' DNS resolvers. \
+    * Includes configurable **DNS caching** to improve response times and reduce load on Tor's DNS.
+* **Bundled Privoxy HTTP Proxy**:
+    * Privoxy runs within the `torgo` Docker container (default port: `8118`).
+    * Acts as an HTTP-to-SOCKS5 bridge, forwarding HTTP requests to `torgo`'s common SOCKS5 proxy.
+    * Simplifies setups where an external reverse proxy (like Nginx or HAProxy on the host) selectively routes HTTP/HTTPS traffic through Tor.
+* **Load Balancing**: Distributes incoming SOCKS and DNS requests across available healthy Tor instances (currently round-robin). \
+* **Health Monitoring**: Periodically checks the health of each backend Tor instance and excludes unhealthy ones from the load balancing pool. \
+* **Automatic Circuit Rotation**: Configurable time-based automatic `NEWNYM` signals for Tor instances. \
+* **IP Diversity Management**:
+    * Monitors external IPs of Tor instances to ensure diversity across subnets (e.g., /24). \
+    * Can trigger rotations if too many instances share similar IP subnets.
+    * (Conceptual) New circuit requests via the API can incorporate an immediate diversity check with retries.
+* **Management API & Web UI**:
+    * An HTTP API (default: `0.0.0.0:8080`) for instance control: rotate circuit, get health, stats, IP, and configuration. \
+    * Global endpoint to rotate all healthy instances with a stagger delay. \
+    * A basic Web UI served at `/webui` for monitoring instance status and triggering new circuits. \
+* **Dockerized**: Easy to build and deploy using Docker and Docker Compose. Includes a Docker health check. \
+* **Configurable**: Most parameters are configurable via environment variables. \
 
-* **Multiple Backend Tor Instances**: Run and manage `N` independent Tor processes.
-* **Common SOCKS5 Proxy**: A single entry point (default: `0.0.0.0:9000`) that load balances SOCKS5 connections.
-* **Common DNS Proxy**: A single entry point (default: `0.0.0.0:5300`) that load balances DNS queries.
-* **Configurable Load Balancing**: "random" (default), "round-robin", "least-connections-proxy".
-* **Circuit Management API & Automation**:
-    * Manual rotation of individual or all circuits.
-    * Automated rotation based on circuit age and IP address diversity (via CircuitManager).
-* **Health Monitoring**: Periodically checks backend Tor instances.
-* **Performance Testing**: Optional periodic latency and speed tests per instance.
-* **Web UI**: (`/webui`)
-    * Monitor instance status, IP, active connections.
-    * Trigger new circuits.
-    * View performance metrics (latency, speed).
-    * Configure ExitNode and ExcludeNode policies per instance.
-* **Dockerized**: Easy deployment with Docker and Docker Compose.
-* **Highly Configurable**: Via environment variables.
-
-## Project Structure (Simplified for v3)
+## Project Structure (Refined Modular Layout)
 
 ```
 torgo/
 ├── cmd/torgo/
-│   └── main.go
+│   └── main.go                     # Main application entry point
+│
 ├── internal/
-│   ├── api/                # HTTP API handlers & WebUI (handlers.go, webui.html)
-│   ├── circuitmanager/     # NEW: Unified circuit rotation, IP diversity, performance tests (manager.go)
-│   ├── config/             # Application configuration (config.go)
-│   ├── health/             # Health monitoring (monitor.go)
-│   ├── lb/                 # Load balancing logic (loadbalancer.go)
-│   ├── proxy/              # SOCKS5 and DNS proxy servers (dns_proxy.go, socks_proxy.go)
-│   └── torinstance/        # Tor instance management & control (instance.go)
+│   ├── api/                        # HTTP API handlers and WebUI serving
+│   │   ├── handlers.go
+│   │   └── webui_handler.go        # (Handles webui.html embedding and serving)
+│   │
+│   ├── config/                     # Application configuration
+│   │   └── config.go
+│   │
+│   ├── dns/                        # DNS related logic
+│   │   ├── cache.go                # DNS caching
+│   │   └── proxy.go                # DNS proxy server and request handling
+│   │
+│   ├── socks/                      # SOCKS proxy logic
+│   │   └── proxy.go
+│   │
+│   ├── tor/                        # Tor instance management and control
+│   │   └── instance.go
+│   │
+│   ├── health/                     # Health monitoring for Tor instances
+│   │   └── monitor.go
+│   │
+│   ├── rotation/                   # Circuit rotation strategies
+│   │   ├── auto_monitor.go         # Time-based auto-rotation
+│   │   └── diversity_monitor.go    # IP diversity based rotation
+│   │
+│   └── lb/                         # Load balancing logic
+│       └── roundrobin.go
+│
+├── web/                            # Static web assets for the UI (if not embedded)
+│   └── ui/
+│       └── index.html              # (Previously webui.html)
+│       └── style.css
+│
 ├── Dockerfile
 ├── docker-compose.yml
 ├── docker-healthcheck.sh
 ├── entrypoint.sh
 ├── go.mod
 ├── go.sum
-├── README.md               # This file
-└── torrc.template          # Template for Tor configuration
+├── privoxy_config                  # Bundled Privoxy configuration
+└── README.md
 ```
 
 ## Prerequisites
@@ -59,64 +84,94 @@ torgo/
 
 ## Getting Started
 
-1.  **Clone the repository (or create the files as provided).**
-2.  **(Optional) Create a `.env` file** in the project root to customize settings (see `docker-compose.yml` for available variables).
+1.  **Clone the repository (or ensure all project files are in place).**
+2.  **(Optional) Create a `.env` file** in the project root to customize settings. See `docker-compose.yml` for available variables and their defaults. Example:
+    ```env
+    TOR_INSTANCES=5
+    API_PORT=8088
+    COMMON_SOCKS_PROXY_PORT=9999
+    COMMON_DNS_PROXY_PORT=5353 # For Torgo's DNS proxy
+    PRIVOXY_HTTP_PORT=8118 # For the bundled Privoxy's HTTP port mapping
+    DNS_CACHE_ENABLED=true
+    DNS_CACHE_EVICTION_INTERVAL_SECONDS=600
+    ```
 3.  **Build and run using Docker Compose**:
     ```bash
     docker-compose up --build -d
     ```
+    This will build the `torgo` image (including Privoxy) and start the service in detached mode.
 
 ## Configuration
 
-Key environment variables (see `docker-compose.yml` and `internal/config/config.go` for defaults and full list):
+Key environment variables (set in `.env` or `docker-compose.yml` \):
 
 * `TOR_INSTANCES`: Number of backend Tor instances.
-* `API_PORT`, `COMMON_SOCKS_PROXY_PORT`, `COMMON_DNS_PROXY_PORT`.
-* `LOAD_BALANCING_STRATEGY`: `random`, `round-robin`, `least-connections-proxy`.
-* `CIRCUIT_MANAGER_ENABLED`: `true` or `false`.
-* `CIRCUIT_MAX_AGE_SECONDS`: Max age for circuits before rotation (0 to disable).
-* `IP_DIVERSITY_ENABLED`: `true` or `false` (within CircuitManager).
-* `PERF_TEST_ENABLED`: `true` or `false`.
-* `PERF_TEST_INTERVAL_SECONDS`: How often to run performance tests.
-* ... and many more for fine-tuning.
+* `SOCKS_BASE_PORT_CONFIGURED`, `CONTROL_BASE_PORT_CONFIGURED`, `DNS_BASE_PORT_CONFIGURED`: Base ports for individual Tor instances.
+* `COMMON_SOCKS_PROXY_PORT`: Port for `torgo`'s common SOCKS5 proxy.
+* `COMMON_DNS_PROXY_PORT`: Port for `torgo`'s common DNS proxy.
+* `API_PORT`: Port for the management API and WebUI.
+* `PRIVOXY_HTTP_PORT`: Host port to map to the bundled Privoxy's internal port (8118).
+* Rotation & Health: `ROTATION_STAGGER_DELAY_SECONDS`, `HEALTH_CHECK_INTERVAL_SECONDS`, `AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS`, `AUTO_ROTATE_STAGGER_DELAY_SECONDS`.
+* IP Checks & Timeouts: `IP_CHECK_URL`, `SOCKS_TIMEOUT_SECONDS`, `DNS_TIMEOUT_SECONDS`.
+* IP Diversity: `IP_DIVERSITY_CHECK_INTERVAL_SECONDS`, `IP_DIVERSITY_ROTATION_COOLDOWN_SECONDS`, `MIN_INSTANCES_FOR_IP_DIVERSITY_CHECK`.
+* DNS Cache: `DNS_CACHE_ENABLED`, `DNS_CACHE_EVICTION_INTERVAL_SECONDS`, `DNS_CACHE_DEFAULT_MIN_TTL_SECONDS`, `DNS_CACHE_MIN_TTL_OVERRIDE_SECONDS`, `DNS_CACHE_MAX_TTL_OVERRIDE_SECONDS`.
+
+(Refer to `internal/config/config.go` for how these are parsed \)
 
 ## Using torgo
 
 * **SOCKS5 Proxy**: Configure applications to use `127.0.0.1:<COMMON_SOCKS_PROXY_PORT>`.
-* **DNS Proxy**: Configure system/applications to use `127.0.0.1:<COMMON_DNS_PROXY_PORT>`.
-* **Web UI**: Access at `http://localhost:<API_PORT>/webui`.
+* **DNS Proxy**: Configure system/applications to use `127.0.0.1:<COMMON_DNS_PROXY_PORT>` (UDP & TCP).
+* **HTTP Proxy (via bundled Privoxy)**:
+    * The bundled Privoxy listens on port 8118 inside the container. If you map this to a host port (e.g., `8118:8118`), applications can use `http://127.0.0.1:8118` as an HTTP proxy to access the Tor network via `torgo`.
+    * More commonly, this is used with a reverse proxy like Nginx on your VPS for selective routing (see below).
+* **Web UI**: Access at `http://localhost:<API_PORT>/webui`. \
 
 ## API Endpoints
 
-The management API listens on `http://localhost:<API_PORT>`.
+The management API listens on `http://localhost:<API_PORT>` \.
 
 ### Global Endpoints
+* **`GET /api/v1/app-details`**: Provides basic application configuration details.
+* **`POST` or `GET` `/api/v1/rotate-all-staggered`**: Rotates circuits for all healthy instances, staggered. Streams progress.
 
-* **`GET` `/api/v1/app-details`**: Application configuration.
-* **`POST` or `GET` `/api/v1/rotate-all-staggered`**: Manually rotate all healthy circuits.
+### Per-Instance Endpoints
+Replace `<id>` with the Tor instance number (e.g., `tor1`, `tor2`).
 
-### Per-Instance Endpoints (`<id>` = `tor1`, `tor2`, ...)
+* **`POST` or `GET` `/api/v1/tor<id>/rotate`**: Signals for a new circuit (NEWNYM).
+* **`GET /api/v1/tor<id>/health`**: Checks health status.
+* **`GET /api/v1/tor<id>/stats`**: Retrieves Tor statistics.
+* **`GET /api/v1/tor<id>/ip`**: Gets the current external IP through this instance.
+* **`GET /api/v1/tor<id>/config`**: Retrieves backend instance configuration details.
+* **(Risky)** `POST /api/v1/tor<id>/config/{socksport|dnsport|controlport}`: Dynamically changes backend ports.
 
-* **`POST` or `GET` `/api/v1/<id>/rotate`**: New circuit for the instance.
-* **`GET` `/api/v1/<id>/health`**: Health status.
-* **`GET` `/api/v1/<id>/stats`**: Tor statistics.
-* **`GET` `/api/v1/<id>/ip`**: External IP.
-* **`GET` `/api/v1/<id>/config`**: Instance configuration, including current node policies.
-* **`POST` `/api/v1/<id>/config/nodepolicy`**: Set node policies (ExitNodes, ExcludeNodes, EntryNodes).
-    * JSON Body: `{"policy_type": "ExitNodes", "nodes": "{us},{ca}"}` or `{"policy_type": "ExcludeNodes", "nodes": "{ru}"}`. Empty `nodes` clears.
-* **`GET` `/api/v1/<id>/performancemetrics`**: Get stored latency and speed test results.
-* **`POST` `/api/v1/<id>/config/socksport` / `dnsport` / `controlport`**: Dynamically change backend ports (use with caution).
+## Advanced Usage: Selective Routing
+
+To route only specific websites through Tor while others go direct, you can use an external reverse proxy (like Nginx or HAProxy) on your VPS host.
+
+1.  Your client (e.g., browser connected via WireGuard) points to this external Nginx/HAProxy as its HTTPS proxy.
+2.  Nginx/HAProxy terminates SSL and inspects the requested domain.
+3.  Based on your rules:
+    * For Tor-bound domains, Nginx/HAProxy forwards the HTTP request to the `torgo` container's Privoxy port (e.g., `http://127.0.0.1:8118` if mapped from the container).
+    * Privoxy then forwards this to `torgo`'s SOCKS5 proxy, out to Tor.
+    * Other domains can be proxied directly by Nginx/HAProxy or blocked.
 
 ## Development
 
-* Go (1.20+ recommended).
-* Run `go mod tidy`.
-* The `webui.html` is self-contained.
+* The Go application (`cmd/torgo/main.go`) uses packages from `internal/`.
+* Ensure Go (1.21+) is installed for local development.
+* `go mod tidy` for dependencies.
 
-## Stopping
+## Stopping the Service
 
 ```bash
 docker-compose down
 ```
 
-**Note:** This README needs to be fully updated to detail the CircuitManager, performance testing, and advanced WebUI controls.
+## Future Enhancements / TODO
+
+* More sophisticated load balancing strategies (e.g., least connections)..
+* Enhanced Web UI with more stats and controls.
+* Metrics endpoint for Prometheus scraping.
+* More robust error handling and recovery for individual Tor process issues beyond control port commands.
+
