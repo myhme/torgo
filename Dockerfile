@@ -25,7 +25,7 @@ WORKDIR /app
 COPY --from=builder /app/torgo-app .
 
 COPY torrc.template /etc/tor/torrc.template
-COPY privoxy_config /etc/privoxy/config # Privoxy config
+COPY privoxy_config /etc/privoxy/config
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker-healthcheck.sh /usr/local/bin/docker-healthcheck.sh
 
