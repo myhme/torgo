@@ -17,7 +17,6 @@ import (
 	"torgo/internal/tor"
 )
 
-// RegisterAPIHandlers sets up the routing for the /api/v1/ endpoints.
 func RegisterAPIHandlers(mux *http.ServeMux, instances []*tor.Instance, appCfg *config.AppConfig) {
 	mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
 		MasterAPIRouter(w, r, instances, appCfg)
@@ -61,7 +60,6 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 	defer atomic.StoreInt32(&appCfg.IsGlobalRotationActive, 0)
 
 	log.Println("API: Received request for STAGGERED rotation of all healthy Tor instances.")
-
 	flusher, okFlusher := w.(http.Flusher)
 	if okFlusher {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -69,7 +67,6 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 		fmt.Fprintln(w, "Starting staggered rotation for all healthy instances...")
 		flusher.Flush()
 	} else {
-		log.Println("Warning: ResponseWriter does not support flushing for staggered rotation progress.")
 		fmt.Fprintln(w, "Staggered rotation initiated. Monitor logs for progress.")
 	}
 
@@ -83,219 +80,130 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 	if len(healthyInstances) == 0 {
 		log.Println("API: No healthy instances to rotate.")
 		fmt.Fprintln(w, "No healthy instances found to rotate.")
-		if okFlusher {
-			flusher.Flush()
-		}
+		if okFlusher { flusher.Flush() }
 		return
 	}
 
-	log.Printf("API: Found %d healthy instances for staggered rotation.", len(healthyInstances))
 	fmt.Fprintf(w, "Found %d healthy instances. Rotating with a %v delay between each...\n", len(healthyInstances), appCfg.RotationStaggerDelay)
-	if okFlusher {
-		flusher.Flush()
-	}
+	if okFlusher { flusher.Flush() }
 
 	rotationCtx := r.Context()
-
 	for i, instance := range healthyInstances {
 		select {
 		case <-rotationCtx.Done():
-			log.Printf("API: Staggered rotation cancelled by client disconnect or server shutdown before instance %d.", instance.InstanceID)
+			log.Printf("API: Staggered rotation cancelled before instance %d.", instance.InstanceID)
 			fmt.Fprintln(w, "Rotation cancelled.")
-			if okFlusher {
-				flusher.Flush()
-			}
+			if okFlusher { flusher.Flush() }
 			return
 		default:
 		}
-		log.Printf("API: Staggered rotation: Rotating instance %d (%s)", instance.InstanceID, instance.GetControlHost())
 		fmt.Fprintf(w, "Rotating instance %d (%s)...\n", instance.InstanceID, instance.GetControlHost())
-		if okFlusher {
-			flusher.Flush()
-		}
+		if okFlusher { flusher.Flush() }
 
 		response, err := instance.SendTorCommand("SIGNAL NEWNYM")
 		if err != nil {
-			log.Printf("API: Staggered rotation: Error rotating instance %d: %v", instance.InstanceID, err)
 			fmt.Fprintf(w, "Error rotating instance %d: %v\n", instance.InstanceID, err)
 		} else {
-			log.Printf("API: Staggered rotation: Instance %d NEWNYM response: %s", instance.InstanceID, firstNChars(response, 60))
 			fmt.Fprintf(w, "Instance %d NEWNYM response: %s\n", instance.InstanceID, firstNChars(response, 60))
-			instance.SetExternalIP("", time.Time{}) // Clear IP
+			instance.SetExternalIP("", time.Time{})
 		}
-		if okFlusher {
-			flusher.Flush()
-		}
+		if okFlusher { flusher.Flush() }
 
 		if i < len(healthyInstances)-1 {
-			log.Printf("API: Staggered rotation: Sleeping for %v before next instance.", appCfg.RotationStaggerDelay)
 			select {
 			case <-time.After(appCfg.RotationStaggerDelay):
 			case <-rotationCtx.Done():
-				log.Printf("API: Staggered rotation sleep interrupted for instance %d.", instance.InstanceID)
 				fmt.Fprintln(w, "Rotation sleep interrupted.")
-				if okFlusher {
-					flusher.Flush()
-				}
+				if okFlusher { flusher.Flush() }
 				return
 			}
 		}
 	}
-	log.Println("API: Staggered rotation completed for all healthy instances.")
 	fmt.Fprintln(w, "Staggered rotation process completed.")
-	if okFlusher {
-		flusher.Flush()
-	}
+	if okFlusher { flusher.Flush() }
 }
 
 func MasterAPIRouter(w http.ResponseWriter, r *http.Request, instances []*tor.Instance, appCfg *config.AppConfig) {
 	path := r.URL.Path
-
-	if path == "/api/v1/app-details" {
-		AppDetailsHandler(w, r, appCfg)
-		return
-	}
+	if path == "/api/v1/app-details" { AppDetailsHandler(w, r, appCfg); return }
 	if path == "/api/v1/rotate-all-staggered" {
 		if r.Method == http.MethodPost || r.Method == http.MethodGet {
 			rotateAllStaggeredHandler(w, r, instances, appCfg)
-		} else {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		}
+		} else { http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed) }
 		return
 	}
 
 	parts := strings.Split(strings.TrimPrefix(path, "/api/v1/"), "/")
-	if len(parts) < 2 || !strings.HasPrefix(parts[0], "tor") {
-		http.NotFound(w, r)
-		return
-	}
-
+	if len(parts) < 2 || !strings.HasPrefix(parts[0], "tor") { http.NotFound(w, r); return }
 	instanceIDStr := strings.TrimPrefix(parts[0], "tor")
 	instanceID, err := strconv.Atoi(instanceIDStr)
 	if err != nil || instanceID < 1 || instanceID > len(instances) {
-		http.Error(w, "Invalid Tor instance ID", http.StatusBadRequest)
-		return
+		http.Error(w, "Invalid Tor instance ID", http.StatusBadRequest); return
 	}
 	instance := instances[instanceID-1]
 	action := parts[1]
 
 	switch action {
 	case "rotate":
-		if r.Method != http.MethodPost && r.Method != http.MethodGet {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
+		if r.Method != http.MethodPost && r.Method != http.MethodGet { http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed); return }
 		response, err := instance.SendTorCommand("SIGNAL NEWNYM")
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to rotate instance %d: %s", instance.InstanceID, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		instance.SetExternalIP("", time.Time{}) // Clear IP
+		if err != nil { http.Error(w, fmt.Sprintf("Failed to rotate instance %d: %s", instance.InstanceID, err.Error()), http.StatusInternalServerError); return }
+		instance.SetExternalIP("", time.Time{})
 		fmt.Fprintf(w, "Instance %d NEWNYM response: %s", instance.InstanceID, firstNChars(response, 100))
-
 	case "health":
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
+		if r.Method != http.MethodGet { http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed); return }
 		liveHealthy := instance.CheckHealth(r.Context())
 		cachedHealthy, lastCheck, _ := instance.GetHealthStatus()
-		respData := map[string]interface{}{
-			"instance_id":               instance.InstanceID,
-			"live_healthy_check_result": liveHealthy,
-			"cached_is_healthy":         cachedHealthy,
-			"last_health_check_at":      lastCheck.Format(time.RFC3339Nano),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(respData)
-
+		respData := map[string]interface{}{ "instance_id": instance.InstanceID, "live_healthy_check_result": liveHealthy, "cached_is_healthy": cachedHealthy, "last_health_check_at": lastCheck.Format(time.RFC3339Nano)}
+		w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(respData)
 	case "stats":
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
+		if r.Method != http.MethodGet { http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed); return }
 		version, vErr := instance.SendTorCommand("GETINFO version")
 		bootstrap, bErr := instance.SendTorCommand("GETINFO status/bootstrap-phase")
 		trafficRead, trErr := instance.SendTorCommand("GETINFO traffic/read")
 		trafficWritten, twErr := instance.SendTorCommand("GETINFO traffic/written")
 		statsData := map[string]interface{}{
-			"instance_id":           instance.InstanceID,
-			"version":               strings.TrimSpace(version), "version_error": fmtError(vErr),
-			"bootstrap_status":      strings.TrimSpace(bootstrap), "bootstrap_error": fmtError(bErr),
-			"traffic_read":          strings.TrimSpace(trafficRead), "traffic_read_error": fmtError(trErr),
-			"traffic_written":       strings.TrimSpace(trafficWritten), "traffic_written_error": fmtError(twErr),
+			"instance_id": instance.InstanceID,
+			"version": strings.TrimSpace(version), "version_error": fmtError(vErr),
+			"bootstrap_status": strings.TrimSpace(bootstrap), "bootstrap_error": fmtError(bErr),
+			"traffic_read": strings.TrimSpace(trafficRead), "traffic_read_error": fmtError(trErr),
+			"traffic_written": strings.TrimSpace(trafficWritten), "traffic_written_error": fmtError(twErr),
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(statsData)
-
+		w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(statsData)
 	case "ip":
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
+		if r.Method != http.MethodGet { http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed); return }
 		client := instance.GetHTTPClient()
-		if client == nil {
-			http.Error(w, fmt.Sprintf("HTTP client for instance %d not ready", instance.InstanceID), http.StatusServiceUnavailable)
-			return
-		}
-		reqCtx, cancel := context.WithTimeout(r.Context(), appCfg.SocksTimeout*2+5*time.Second)
-		defer cancel()
+		if client == nil { http.Error(w, fmt.Sprintf("HTTP client for instance %d not ready", instance.InstanceID), http.StatusServiceUnavailable); return }
+		reqCtx, cancel := context.WithTimeout(r.Context(), appCfg.SocksTimeout*2+5*time.Second); defer cancel()
 		httpReq, _ := http.NewRequestWithContext(reqCtx, http.MethodGet, appCfg.IPCheckURL, nil)
 		resp, err := client.Do(httpReq)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to get IP via instance %d: %s", instance.InstanceID, err.Error()), http.StatusInternalServerError)
-			return
-		}
+		if err != nil { http.Error(w, fmt.Sprintf("Failed to get IP via instance %d: %s", instance.InstanceID, err.Error()), http.StatusInternalServerError); return }
 		defer resp.Body.Close()
 		body, errRead := io.ReadAll(resp.Body)
-		if errRead != nil {
-			http.Error(w, fmt.Sprintf("Failed to read IP response body from instance %d: %s", instance.InstanceID, errRead.Error()), http.StatusInternalServerError)
-			return
-		}
-		var ipJsonResponse struct { IP string `json:"IP"` }
-		var plainTextResponse string
-		isJsonResponse := false
+		if errRead != nil { http.Error(w, fmt.Sprintf("Failed to read IP response body from instance %d: %s", instance.InstanceID, errRead.Error()), http.StatusInternalServerError); return }
+		var ipJsonResponse struct { IP string `json:"IP"` }; var plainTextResponse string; isJsonResponse := false
 		if errJson := json.Unmarshal(body, &ipJsonResponse); errJson == nil && ipJsonResponse.IP != "" {
-			instance.SetExternalIP(ipJsonResponse.IP, time.Now())
-			isJsonResponse = true
+			instance.SetExternalIP(ipJsonResponse.IP, time.Now()); isJsonResponse = true
 		} else {
 			trimmedBody := strings.TrimSpace(string(body))
-			if net.ParseIP(trimmedBody) != nil {
-				instance.SetExternalIP(trimmedBody, time.Now())
-				plainTextResponse = trimmedBody
-			} else {
-				log.Printf("Instance %d: IP response not valid JSON or plain IP: %s", instance.InstanceID, firstNChars(trimmedBody, 50))
-			}
+			if net.ParseIP(trimmedBody) != nil { instance.SetExternalIP(trimmedBody, time.Now()); plainTextResponse = trimmedBody
+			} else { log.Printf("Instance %d: IP response not valid: %s", instance.InstanceID, firstNChars(trimmedBody, 50)) }
 		}
 		currentIP, _, _ := instance.GetExternalIPInfo()
-		if isJsonResponse {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"IP": currentIP})
-		} else if plainTextResponse != "" {
-			w.Header().Set("Content-Type", "text/plain")
-			fmt.Fprint(w, currentIP)
-		} else {
-			w.Header().Set("Content-Type", "text/plain")
-			fmt.Fprint(w, "Could not determine IP from response. Raw: "+string(body))
-		}
-
+		if isJsonResponse { w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(map[string]string{"IP": currentIP})
+		} else if plainTextResponse != "" { w.Header().Set("Content-Type", "text/plain"); fmt.Fprint(w, currentIP)
+		} else { w.Header().Set("Content-Type", "text/plain"); fmt.Fprint(w, "Could not determine IP. Raw: "+string(body)) }
 	case "config":
 		if r.Method == http.MethodGet {
 			cfgData := instance.GetConfigSnapshot()
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(cfgData)
-		} else {
-			http.Error(w, "Method Not Allowed for instance config (only GET is supported)", http.StatusMethodNotAllowed)
-		}
-
+			w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(cfgData)
+		} else { http.Error(w, "Method Not Allowed (only GET)", http.StatusMethodNotAllowed) }
 	default:
 		http.NotFound(w, r)
 	}
 }
 
 func fmtError(err error) string {
-	if err == nil {
-		return ""
-	}
+	if err == nil { return "" }
 	return err.Error()
 }

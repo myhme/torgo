@@ -21,7 +21,7 @@ import (
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
-	log.Println("Starting torgo application...")
+	log.Println("Starting torgo application (S6 Managed)...")
 
 	appCfg := config.LoadConfig()
 
@@ -39,47 +39,50 @@ func main() {
 		backendInstances[i] = tor.New(instanceID, appCfg)
 	}
 
-	mainCtx, cancel := context.WithCancel(context.Background())
+	// S6 Overlay handles service readiness, so initial health checks here might be redundant
+	// if S6 services depend on Tor instances being somewhat up (e.g. cookies present).
+	// However, torgo-app itself still benefits from knowing their state.
+	// The 01-tor-setup script in S6 waits for cookies.
+	log.Println("Tor instances assumed to be starting/started by S6. Performing initial health checks...")
+	mainCtx, cancel := context.WithCancel(context.Background()) // mainCtx for torgo app lifecycle
 	defer cancel()
 
-	log.Println("Performing initial health checks for all instances before starting proxy servers...")
 	var initialHealthCheckWG sync.WaitGroup
 	for _, instance := range backendInstances {
 		initialHealthCheckWG.Add(1)
 		go func(inst *tor.Instance) {
 			defer initialHealthCheckWG.Done()
+			// Give Tor instances a bit more time to come up if S6 just started them
+			time.Sleep(5 * time.Second) // Adjust as needed, or rely on S6 readiness
 			inst.CheckHealth(mainCtx)
 		}(instance)
 	}
 	initialHealthCheckWG.Wait()
-	log.Println("Initial health checks completed for all instances.")
+	log.Println("Initial health checks completed for all instances by torgo-app.")
 
 	// Initialize DNS Cache if enabled
 	if appCfg.DNSCacheEnabled {
-		dns.SetGlobalDNSCache(dns.NewDNSCache(appCfg)) // NewDNSCache now returns *DNSCache
-		log.Println("Global DNS Cache Initialized.")
+		dns.SetGlobalDNSCache(dns.NewDNSCache(appCfg))
+		log.Println("Global DNS Cache Initialized by torgo-app.")
 	}
 
-	// Start core services
+	// Start core services managed by torgo-app's goroutines
 	go health.Monitor(mainCtx, backendInstances, appCfg)
 	go socks.StartSocksProxyServer(mainCtx, backendInstances, appCfg)
 	go dns.StartDNSProxyServer(mainCtx, backendInstances, appCfg)
 
-	// Start IP Diversity Monitor
 	if appCfg.MinInstancesForIPDiversityCheck > 0 && appCfg.NumTorInstances >= appCfg.MinInstancesForIPDiversityCheck {
 		go rotation.MonitorIPDiversity(mainCtx, backendInstances, appCfg)
 	} else {
-		log.Println("IP Diversity Monitor: Disabled due to configuration.")
+		log.Println("IP Diversity Monitor: Disabled by configuration.")
 	}
 
-	// Start Automatic Circuit Rotation Monitor
 	if appCfg.IsAutoRotationEnabled && appCfg.AutoRotateCircuitInterval > 0 {
 		go rotation.MonitorAutoRotation(mainCtx, backendInstances, appCfg)
 	} else {
 		log.Println("Automatic Circuit Rotation Monitor: Disabled by configuration.")
 	}
 
-	// Setup HTTP server for API and WebUI
 	httpMux := http.NewServeMux()
 	api.RegisterWebUIHandlers(httpMux)
 	api.RegisterAPIHandlers(httpMux, backendInstances, appCfg)
@@ -99,12 +102,14 @@ func main() {
 		}
 	}()
 
+	// Graceful shutdown handling for torgo-app itself
+	// S6 will send SIGTERM to this process (PID 1 in its service definition)
 	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM) // SIGTERM is what S6 sends by default
 	sig := <-quit
 	log.Printf("Received signal: %s. Shutting down torgo application...", sig)
 
-	cancel() // Signal all background goroutines to stop
+	cancel() // Signal all torgo-app's background goroutines to stop
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer shutdownCancel()
@@ -113,13 +118,12 @@ func main() {
 		log.Printf("API server shutdown error: %v", err)
 	}
 
-	log.Println("Closing Tor instance control connections...")
+	log.Println("Closing Tor instance control connections from torgo-app...")
 	for _, instance := range backendInstances {
 		instance.CloseControlConnection()
 	}
 
-	// Wait for a moment for goroutines to finish (simple approach)
-	time.Sleep(2 * time.Second)
-
+	time.Sleep(2 * time.Second) // Allow goroutines to finish
 	log.Println("Torgo application shut down gracefully.")
+	// S6 will handle stopping the Tor and Privoxy services.
 }

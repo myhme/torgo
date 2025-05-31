@@ -1,0 +1,9 @@
+#!/command/execlineb -P
+# S6 run script for Privoxy
+
+foreground { echo "--- S6: Starting Privoxy ---" }
+
+# Privoxy will run as root unless its config or this script changes the user.
+# It reads /etc/privoxy/config which points to torgo's SOCKS port.
+# --no-daemon is crucial for S6 supervision.
+exec privoxy --no-daemon /etc/privoxy/config

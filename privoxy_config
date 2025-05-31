@@ -1,32 +1,12 @@
-# Privoxy Configuration for torgo container
-# Placed at /etc/privoxy/config inside the container.
-
 listen-address 0.0.0.0:8118
-
-# Forward all HTTP/HTTPS CONNECT requests through torgo's SOCKS5 proxy.
-# torgo SOCKS proxy listens on 127.0.0.1:9000 (internally, by default).
-# This port is configurable in torgo via COMMON_SOCKS_PROXY_PORT.
 forward-socks5 / 127.0.0.1:9000 .
-
-# Standard Privoxy files (Alpine package usually sets these up)
 actionsfile default.action
 actionsfile match-all.action
 actionsfile user.action
 filterfile default.filter
 filterfile user.filter
-
-# Disable file logging for privacy and container environments.
-# Errors/startup messages go to stderr with --no-daemon.
-# logfile /dev/null
-# jarfile /dev/null
-
-# Debugging: 0 = fatal errors only (production/privacy).
 debug 0
-
-# Do not accept intercepted requests.
 accept-intercepted-requests 0
-
-# Disable web-based configuration changes for security.
 enable-remote-toggle 0
 enable-remote-http-toggle 0
 enable-edit-actions 0

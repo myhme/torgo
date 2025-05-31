@@ -145,33 +145,33 @@
             document.getElementById(`refresh-ip-btn-${id}`).addEventListener('click', async () => {
                 document.getElementById(`instance-${id}-ip`).textContent = 'Fetching IP...';
                 showToast(`Fetching IP for instance ${id}...`, 'info', 2000);
-                await fetchData(`/tor${id}/ip`); // API call updates IP on backend
-                const configData = await fetchData(`/tor${id}/config`); // Re-fetch config for updated IP & time
+                await fetchData(`/tor${id}/ip`);
+                const configData = await fetchData(`/tor${id}/config`);
                 instancesData[id] = { ...instancesData[id], config: configData };
                 updateInstanceCardUI(id, instancesData[id]);
             });
         }
         function updateInstanceCardUI(id, data) {
             const el = suffix => document.getElementById(`instance-${id}-${suffix}`);
-            if (!el('status-dot')) return; // Card not ready
-            if (data && data.health && !data.health.error) {
+            if (!el('status-dot')) return;
+            if (data?.health && !data.health.error) {
                 el('status-dot').className = data.health.cached_is_healthy ? 'status-dot status-healthy' : 'status-dot status-unhealthy';
                 el('status-text').textContent = data.health.cached_is_healthy ? 'Healthy' : 'Unhealthy';
                 if (data.health.last_health_check_at) el('status-text').textContent += ` (checked ${formatTimeAgo(data.health.last_health_check_at)})`;
-            } else { el('status-dot').className = 'status-dot status-unknown'; el('status-text').textContent = (data && data.health && data.health.error) ? `Error: ${data.health.error}` : 'Health N/A'; }
-            if (data && data.config && !data.config.error) {
+            } else { el('status-dot').className = 'status-dot status-unknown'; el('status-text').textContent = (data?.health?.error) ? `Error: ${data.health.error}` : 'Health N/A'; }
+            if (data?.config && !data.config.error) {
                 el('ip').textContent = data.config.external_ip || 'N/A';
                 el('ip-change-time').textContent = formatTimeAgo(data.config.last_ip_change_at);
                 el('circuit-rec-time').textContent = formatTimeAgo(data.config.last_circuit_recreation_at);
                 el('control').textContent = data.config.control_host || 'N/A'; el('socks').textContent = data.config.backend_socks_host || 'N/A'; el('dns').textContent = data.config.backend_dns_host || 'N/A';
-            } else { ['ip', 'ip-change-time', 'circuit-rec-time', 'control', 'socks', 'dns'].forEach(s => el(s).textContent = 'N/A'); if (data && data.config && data.config.error) el('ip').textContent = `Config Err`; }
-            if (data && data.stats && !data.stats.error) {
+            } else { ['ip', 'ip-change-time', 'circuit-rec-time', 'control', 'socks', 'dns'].forEach(s => el(s).textContent = 'N/A'); if (data?.config?.error) el('ip').textContent = `Config Err`; }
+            if (data?.stats && !data.stats.error) {
                 const bs = data.stats.bootstrap_status ? data.stats.bootstrap_status.match(/SUMMARY="([^"]+)"/) : null;
                 el('bootstrap').textContent = bs ? bs[1] : (data.stats.bootstrap_status || 'N/A');
                 if (data.stats.bootstrap_error) el('bootstrap').textContent += ` (Error: ${data.stats.bootstrap_error})`;
                 el('version').textContent = data.stats.version || "N/A";
                 if (data.stats.version_error) el('version').textContent += ` (Error: ${data.stats.version_error})`;
-            } else { el('bootstrap').textContent = (data && data.stats && data.stats.error) ? `Stats Err` : 'N/A'; el('version').textContent = "N/A"; }
+            } else { el('bootstrap').textContent = (data?.stats?.error) ? `Stats Err` : 'N/A'; el('version').textContent = "N/A"; }
         }
         async function showFullStats(id) {
             dom.modalTitle.textContent = `Full Stats for Instance ${id}`; dom.modalContent.textContent = 'Loading...'; dom.modal.style.display = "block";
@@ -205,11 +205,8 @@
             const configInstances = parseInt(appDetails.num_instances, 10) || 0;
             if (configInstances === 0) { dom.socksStatus.innerHTML = dom.dnsStatus.innerHTML = 'No instances.'; return; }
             let healthyCount = 0;
-            for (let i = 1; i <= configInstances; i++) {
-                if (instancesData[i]?.health?.cached_is_healthy === true) healthyCount++;
-            }
-            const statusHTML = healthyCount > 0 ? `<span class="status-dot status-healthy"></span>Operational (${healthyCount}/${configInstances} healthy)`
-                                             : `<span class="status-dot status-unhealthy"></span>Offline (0/${configInstances} healthy)`;
+            for (let i = 1; i <= configInstances; i++) { if (instancesData[i]?.health?.cached_is_healthy === true) healthyCount++; }
+            const statusHTML = healthyCount > 0 ? `<span class="status-dot status-healthy"></span>Operational (${healthyCount}/${configInstances} healthy)` : `<span class="status-dot status-unhealthy"></span>Offline (0/${configInstances} healthy)`;
             dom.socksStatus.innerHTML = dom.dnsStatus.innerHTML = statusHTML;
         }
         function renderAppConfigDetails(details) {
@@ -229,11 +226,10 @@
             dom.appConfig.innerHTML = html;
         }
         async function fetchAndRenderInstanceData(id) {
-            createInstanceCard(id); // Ensure card exists
+            createInstanceCard(id);
             try {
                 const [config, health, stats] = await Promise.all([fetchData(`/tor${id}/config`), fetchData(`/tor${id}/health`), fetchData(`/tor${id}/stats`)]);
-                instancesData[id] = { config, health, stats };
-                updateInstanceCardUI(id, instancesData[id]);
+                instancesData[id] = { config, health, stats }; updateInstanceCardUI(id, instancesData[id]);
             } catch (e) { showToast(`Failed to fetch data for instance ${id}`, 'error'); updateInstanceCardUI(id, {config: {error: 'Fetch failed'}, health: {error: 'Fetch failed'}, stats: {error: 'Fetch failed'}}); }
         }
         async function fetchAndRenderAllInstances() {
@@ -242,20 +238,19 @@
             appDetails = (details.error || typeof details.num_instances === 'undefined') ?
                 { num_instances: 0, common_socks_port: 'N/A', common_dns_port: 'N/A', api_port: 'N/A' } : details;
             if(details.error) showToast("Failed to load app details.", "error");
-            renderAppConfigDetails(appDetails);
-            dom.instanceCount.textContent = appDetails.num_instances || 0;
+            renderAppConfigDetails(appDetails); dom.instanceCount.textContent = appDetails.num_instances || 0;
             const numInst = appDetails.num_instances || 0;
             if (numInst === 0) dom.instances.innerHTML = '<p>No Tor instances configured.</p>';
             else {
                 dom.instances.querySelectorAll('.instance-card').forEach(card => {
-                    if (parseInt(card.id.split('-')[1]) > numInst) { card.remove(); delete instancesData[parseInt(card.id.split('-')[1])]; }
+                    const cardIdNum = parseInt(card.id.split('-')[1]);
+                    if (cardIdNum > numInst) { card.remove(); delete instancesData[cardIdNum]; }
                 });
                 const promises = [];
                 for (let i = 1; i <= numInst; i++) { createInstanceCard(i); promises.push(fetchAndRenderInstanceData(i)); }
                 await Promise.allSettled(promises);
             }
-            updateCommonProxyStatusDisplay();
-            dom.lastUpdated.textContent = new Date().toLocaleTimeString();
+            updateCommonProxyStatusDisplay(); dom.lastUpdated.textContent = new Date().toLocaleTimeString();
             dom.refreshBtn.disabled = false; dom.refreshBtn.innerHTML = 'Refresh All Data';
         }
         dom.refreshBtn.addEventListener('click', () => { showToast("Refreshing all data...", 'info', 1500); fetchAndRenderAllInstances(); });

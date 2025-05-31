@@ -2,54 +2,43 @@
 FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
-
-# For Go modules, ensure git is available if direct Git dependencies are used.
-# Alpine's base image is minimal.
-# RUN apk add --no-cache git
-
 COPY go.mod go.sum ./
 RUN go mod download && go mod verify
-
 COPY . .
-
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -a -installsuffix cgo -o torgo-app ./cmd/torgo
 
-# Stage 2: Create the final image
+# Stage 2: Create the final image with S6 Overlay
 FROM alpine:latest
 
-# Install Tor, Privoxy, Tini, and ca-certificates (for HTTPS calls by torgo/Tor)
-RUN apk add --no-cache tor privoxy tini ca-certificates su-exec
+ARG S6_OVERLAY_VERSION=v3.2.1.0
+
+RUN apk add --no-cache tor privoxy su-exec ca-certificates bash curl
+
+ADD https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp/
+ADD https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-$(uname -m).tar.xz /tmp/
+RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz && \
+    tar -C / -Jxpf /tmp/s6-overlay-$(uname -m).tar.xz && \
+    rm -rf /tmp/*
 
 WORKDIR /app
-
 COPY --from=builder /app/torgo-app .
-
 COPY torrc.template /etc/tor/torrc.template
 COPY privoxy_config /etc/privoxy/config
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker-healthcheck.sh /usr/local/bin/docker-healthcheck.sh
+COPY rootfs/ / 
+RUN chmod +x /usr/local/bin/docker-healthcheck.sh && \
+    find /etc/s6-overlay -type f -name run -exec chmod +x {} \; && \
+    find /etc/s6-overlay -type f -name finish -exec chmod +x {} \; && \
+    find /etc/s6-overlay/cont-init.d -type f -exec chmod +x {} \;
 
-RUN chmod +x /usr/local/bin/entrypoint.sh && \
-    chmod +x /usr/local/bin/docker-healthcheck.sh
 
-# Create _tor user and group, and necessary directories
-RUN addgroup -S _tor && \
-    adduser -S -G _tor -h /var/lib/tor -s /sbin/nologin _tor && \
-    mkdir -p /var/lib/tor /var/run/tor /etc/tor && \
-    chown -R _tor:_tor /var/lib/tor /var/run/tor
+RUN mkdir -p /var/lib/tor /var/run/tor /etc/tor && \
+    chown root:root /etc/tor 
+# Torrc files are root-owned, _tor reads them. _tor owns DataDir.
 
-EXPOSE 8080
-# Torgo API
-EXPOSE 9000
-# Torgo SOCKS (used by Privoxy)
-EXPOSE 5300/tcp
-# Torgo DNS
-EXPOSE 5300/udp
-# Torgo DNS
-EXPOSE 8118
-# Privoxy HTTP
+EXPOSE 8080 9000 5300/tcp 5300/udp 8118
 
-HEALTHCHECK --interval=1m --timeout=15s --start-period=2m --retries=3 \
+HEALTHCHECK --interval=1m --timeout=15s --start-period=3m --retries=3 \
   CMD ["/usr/local/bin/docker-healthcheck.sh"]
 
-ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/init"]

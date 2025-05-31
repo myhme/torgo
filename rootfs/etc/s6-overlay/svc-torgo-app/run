@@ -1,0 +1,13 @@
+#!/command/execlineb -P
+# S6 run script for the main torgo Go application
+
+# The 01-tor-setup cont-init script ensures Tor instances are ready (cookies exist)
+# before S6 attempts to start this service if dependencies were set up that way,
+# or simply before this service would successfully connect to Tor control ports.
+
+foreground { echo "--- S6: Starting torgo Go application ---" }
+
+# The Go application /app/torgo-app should not daemonize itself.
+# S6 handles supervision.
+# All environment variables from docker-compose.yml are available here.
+exec /app/torgo-app
