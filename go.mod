@@ -19,6 +19,3 @@ require (
 // indirect dependencies of golang.org/x/net or other packages.
 // Running `go mod tidy` will ensure your go.sum is also updated
 // and that the versions of indirect dependencies are consistent.
-
-
-

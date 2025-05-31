@@ -38,6 +38,7 @@ torgo/
 │   ├── api/                        # HTTP API handlers and WebUI serving
 │   │   ├── handlers.go
 │   │   └── webui_handler.go        # (Handles webui.html embedding and serving)
+│   │   └── static_web_ui/      <-- Your index.html, style.css, etc. go here
 │   │
 │   ├── config/                     # Application configuration
 │   │   └── config.go
@@ -60,12 +61,7 @@ torgo/
 │   │   └── diversity_monitor.go    # IP diversity based rotation
 │   │
 │   └── lb/                         # Load balancing logic
-│       └── roundrobin.go
-│
-├── web/                            # Static web assets for the UI (if not embedded)
-│   └── ui/
-│       └── index.html              # (Previously webui.html)
-│       └── style.css
+│       └── loadbalancer.go
 │
 ├── Dockerfile
 ├── docker-compose.yml
