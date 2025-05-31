@@ -9,34 +9,34 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	// "math/rand" // For seeding if needed, but time.Now().UnixNano() is often sufficient for non-crypto rand
 
 	"torgo/internal/api"
-	"torgo/internal/circuitmanager" // Updated
 	"torgo/internal/config"
+	"torgo/internal/dns"
 	"torgo/internal/health"
-	// "torgo/internal/ipdiversity" // Replaced by circuitmanager
-	// "torgo/internal/autorotate" // Replaced by circuitmanager
-	"torgo/internal/proxy"
-	"torgo/internal/torinstance"
+	"torgo/internal/rotation"
+	"torgo/internal/socks"
+	"torgo/internal/tor"
 )
 
 func main() {
-	// Seed random number generator (for load balancer, if random strategy is used)
-	// rand.Seed(time.Now().UnixNano()) // Go 1.20+ seeds globally automatically. Explicit seed is fine for older versions or clarity.
-
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
 	log.Println("Starting torgo application...")
 
 	appCfg := config.LoadConfig()
 
-	log.Printf("Initializing 'torgo' for %d backend Tor instance(s).", appCfg.NumTorInstances)
+	log.Printf("Initializing 'torgo' for %d backend Tor instance(s). Stagger delay: %v", appCfg.NumTorInstances, appCfg.RotationStaggerDelay)
 	log.Printf("Common SOCKS on port: %s, Common DNS on port: %s, Management API on port: %s", appCfg.CommonSocksPort, appCfg.CommonDNSPort, appCfg.APIPort)
+	if appCfg.DNSCacheEnabled {
+		log.Printf("DNS Cache: ENABLED. Eviction Interval: %v, Default Min TTL: %ds", appCfg.DNSCacheEvictionInterval, appCfg.DNSCacheDefaultMinTTLSeconds)
+	} else {
+		log.Println("DNS Cache: DISABLED.")
+	}
 
-	backendInstances := make([]*torinstance.Instance, appCfg.NumTorInstances)
+	backendInstances := make([]*tor.Instance, appCfg.NumTorInstances)
 	for i := 0; i < appCfg.NumTorInstances; i++ {
 		instanceID := i + 1
-		backendInstances[i] = torinstance.New(instanceID, appCfg)
+		backendInstances[i] = tor.New(instanceID, appCfg)
 	}
 
 	mainCtx, cancel := context.WithCancel(context.Background())
@@ -46,7 +46,7 @@ func main() {
 	var initialHealthCheckWG sync.WaitGroup
 	for _, instance := range backendInstances {
 		initialHealthCheckWG.Add(1)
-		go func(inst *torinstance.Instance) {
+		go func(inst *tor.Instance) {
 			defer initialHealthCheckWG.Done()
 			inst.CheckHealth(mainCtx)
 		}(instance)
@@ -54,27 +54,41 @@ func main() {
 	initialHealthCheckWG.Wait()
 	log.Println("Initial health checks completed for all instances.")
 
+	// Initialize DNS Cache if enabled
+	if appCfg.DNSCacheEnabled {
+		dns.SetGlobalDNSCache(dns.NewDNSCache(appCfg)) // NewDNSCache now returns *DNSCache
+		log.Println("Global DNS Cache Initialized.")
+	}
+
 	// Start core services
-	go health.Monitor(mainCtx, backendInstances, appCfg) // Health monitor remains separate
-	go proxy.StartSocksProxyServer(backendInstances, appCfg)
-	go proxy.StartDNSProxyServer(backendInstances, appCfg)
+	go health.Monitor(mainCtx, backendInstances, appCfg)
+	go socks.StartSocksProxyServer(mainCtx, backendInstances, appCfg)
+	go dns.StartDNSProxyServer(mainCtx, backendInstances, appCfg)
 
-	// Start the new CircuitManager
-	cm := circuitmanager.New(mainCtx, appCfg, backendInstances)
-	cm.Start() // This will internally decide if its components run based on config
+	// Start IP Diversity Monitor
+	if appCfg.MinInstancesForIPDiversityCheck > 0 && appCfg.NumTorInstances >= appCfg.MinInstancesForIPDiversityCheck {
+		go rotation.MonitorIPDiversity(mainCtx, backendInstances, appCfg)
+	} else {
+		log.Println("IP Diversity Monitor: Disabled due to configuration.")
+	}
 
+	// Start Automatic Circuit Rotation Monitor
+	if appCfg.IsAutoRotationEnabled && appCfg.AutoRotateCircuitInterval > 0 {
+		go rotation.MonitorAutoRotation(mainCtx, backendInstances, appCfg)
+	} else {
+		log.Println("Automatic Circuit Rotation Monitor: Disabled by configuration.")
+	}
+
+	// Setup HTTP server for API and WebUI
 	httpMux := http.NewServeMux()
-	httpMux.HandleFunc("/webui", api.WebUIHandler)
-	httpMux.HandleFunc("/webui/", api.WebUIHandler)
-	httpMux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
-		api.MasterAPIRouter(w, r, backendInstances, appCfg)
-	})
+	api.RegisterWebUIHandlers(httpMux)
+	api.RegisterAPIHandlers(httpMux, backendInstances, appCfg)
 
 	apiServer := &http.Server{
 		Addr:         ":" + appCfg.APIPort,
 		Handler:      httpMux,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 45 * time.Second, // Increased for potentially long streaming like rotate-all or getting many stats
+		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -90,21 +104,22 @@ func main() {
 	sig := <-quit
 	log.Printf("Received signal: %s. Shutting down torgo application...", sig)
 
-	cm.Stop() // Stop the circuit manager gracefully
-	cancel()   // Signal all other background goroutines via mainCtx
+	cancel() // Signal all background goroutines to stop
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second) // Increased for graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer shutdownCancel()
+
 	if err := apiServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("API server shutdown error: %v", err)
 	}
 
 	log.Println("Closing Tor instance control connections...")
 	for _, instance := range backendInstances {
-		instance.Mu.Lock()
-		instance.CloseControlConnUnlocked()
-		instance.Mu.Unlock()
+		instance.CloseControlConnection()
 	}
+
+	// Wait for a moment for goroutines to finish (simple approach)
+	time.Sleep(2 * time.Second)
 
 	log.Println("Torgo application shut down gracefully.")
 }

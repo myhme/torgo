@@ -1,28 +1,27 @@
+# Tor Configuration File Template for torgo instances
+
 DataDirectory __DATADIR__
+PidFile __PIDFILE__
 SocksPort __SOCKSPORT__
 ControlPort __CONTROLPORT__
-DNSPort __DNSPORT__
+DNSPort __DNSPORT__ # Tor's own DNS resolver port
 
 CookieAuthentication 1
+CookieAuthFileGroupReadable 0 # More secure if _tor user owns cookie
+
+# Log to stdout for Docker
 Log notice stdout
-PidFile __PIDFILE__
+# For debugging, change 'notice' to 'info' or 'debug' (very verbose)
 
-# Disable IPv6 for client connections and exits
-ClientUseIPv6 0
-IPv6Exit 0
-
-# Ensure IPv4 is used by clients
-ClientUseIPv4 1
-
-# Configure as a client-only node (not a relay)
+# Client-only behavior (usually default if no relay ports are open)
 ClientOnly 1
+# ORPort 0 # Explicitly disable relaying
+# DirPort 0 # Explicitly disable directory services
 
-# Performance and Security/Privacy enhancements
-AvoidDiskWrites 1
-SafeLogging 1
-CircuitPadding 1
-ReducedCircuitPadding 0
-MaxCircuitDirtiness 300
+User _tor # Tor process will run as this user
 
-# Consider adding these for better stability with multiple instances if issues arise:
-# MaxMemInQueues 20MB # Example, adjust based on resources
+SafeLogging 1 # Scrubs IPs from logs
+
+# Consider if IPv6 settings are needed based on your host/network
+# IPv6Exit 0
+# ClientPreferIPv6DirPort 0

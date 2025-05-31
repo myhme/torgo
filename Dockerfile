@@ -3,53 +3,49 @@ FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
 
-# Copy go.mod and go.sum first to leverage Docker cache
-COPY go.mod go.sum ./
-RUN go mod download
-RUN go mod verify
+# For Go modules, ensure git is available if direct Git dependencies are used.
+# Alpine's base image is minimal.
+# RUN apk add --no-cache git
 
-# Copy the rest of the application source code
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+
 COPY . .
 
-# Build the application
-# CGO_ENABLED=0 for a statically linked binary (good for Alpine)
-# -ldflags="-s -w" to strip debug symbols and reduce binary size
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-s -w" -o torgo-app ./cmd/torgo
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -a -installsuffix cgo -o torgo-app ./cmd/torgo
 
-# Stage 2: Create the final lightweight image
+# Stage 2: Create the final image
 FROM alpine:latest
 
-# Install Tor and su-exec (similar to gosu, for running Tor as non-root)
-# ca-certificates is needed for HTTPS calls (e.g., IP checks, performance tests)
-RUN apk add --no-cache tor su-exec ca-certificates tzdata
-
-# Create a non-root user for Tor
-# _tor is a common convention for the Tor user
-RUN addgroup -S _tor && adduser -S -G _tor -h /var/lib/tor _tor
+# Install Tor, Privoxy, Tini, and ca-certificates (for HTTPS calls by torgo/Tor)
+RUN apk add --no-cache tor privoxy tini ca-certificates
 
 WORKDIR /app
 
-# Copy the torrc template and entrypoint script
+COPY --from=builder /app/torgo-app .
+
 COPY torrc.template /etc/tor/torrc.template
-COPY entrypoint.sh /app/entrypoint.sh
-COPY docker-healthcheck.sh /app/docker-healthcheck.sh
-RUN chmod +x /app/entrypoint.sh /app/docker-healthcheck.sh
+COPY privoxy_config /etc/privoxy/config # Privoxy config
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker-healthcheck.sh /usr/local/bin/docker-healthcheck.sh
 
-# Copy the built application from the builder stage
-COPY --from=builder /app/torgo-app /app/torgo-app
+RUN chmod +x /usr/local/bin/entrypoint.sh && \
+    chmod +x /usr/local/bin/docker-healthcheck.sh
 
-# Ensure Tor data directories are writable by the _tor user
-# The entrypoint script will also handle permissions for instance-specific data dirs
-RUN mkdir -p /var/lib/tor /var/run/tor && \
-    chown -R _tor:_tor /var/lib/tor /var/run/tor && \
-    chmod -R 700 /var/lib/tor /var/run/tor
+# Create _tor user and group, and necessary directories
+RUN addgroup -S _tor && \
+    adduser -S -G _tor -h /var/lib/tor -s /sbin/nologin _tor && \
+    mkdir -p /var/lib/tor /var/run/tor /etc/tor && \
+    chown -R _tor:_tor /var/lib/tor /var/run/tor
+    # /etc/tor will be owned by root, torrc files written by root in entrypoint
 
-# Expose default ports (can be overridden by docker-compose.yml or -p flag)
-# API port, common SOCKS port, common DNS port (TCP/UDP)
-EXPOSE 8080 9150 53/tcp 53/udp
+EXPOSE 8080 # Torgo API
+EXPOSE 9000 # Torgo SOCKS (used by Privoxy)
+EXPOSE 5300/tcp # Torgo DNS
+EXPOSE 5300/udp # Torgo DNS
+EXPOSE 8118 # Privoxy HTTP
 
-# Set the entrypoint
-ENTRYPOINT ["/app/entrypoint.sh"]
+HEALTHCHECK --interval=1m --timeout=15s --start-period=2m --retries=3 \
+  CMD ["/usr/local/bin/docker-healthcheck.sh"]
 
-# Default command (not strictly necessary if entrypoint handles everything)
-# CMD ["/app/torgo-app"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
