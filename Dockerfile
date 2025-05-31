@@ -12,7 +12,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -a -installsuffix cgo -o 
 FROM alpine:latest
 
 ARG S6_OVERLAY_VERSION=v3.1.6.2 # You can update this to a newer stable version if available
-ARG TARGETARCH # Docker build-time arch, e.g., amd64, arm64
+ARG TARGETARCH 
+# Docker build-time arch, e.g., amd64, arm64
 
 # Install runtime dependencies: Tor, Privoxy, su-exec (for Tor user), ca-certificates, bash (for some scripts), curl, and wget
 RUN apk add --no-cache tor privoxy su-exec ca-certificates bash curl wget
@@ -24,9 +25,7 @@ RUN echo "Building for TARGETARCH: ${TARGETARCH}" && \
     case "${TARGETARCH}" in \
         "amd64") S6_ARCH_SUFFIX="x86_64" ;; \
         "arm64") S6_ARCH_SUFFIX="aarch64" ;; \
-        "arm") S6_ARCH_SUFFIX="arm" ;; # For armv7, S6 uses 'arm'. For armv6, it might be 'armel'. Check S6 releases.
-        # Add other mappings if you build for other architectures, e.g.: \
-        # "386") S6_ARCH_SUFFIX="i386" ;; \
+        "arm") S6_ARCH_SUFFIX="arm" ;; \
         *) echo "Unsupported TARGETARCH for S6 Overlay: ${TARGETARCH}. Please check S6 Overlay releases for available architectures." >&2; exit 1 ;; \
     esac && \
     echo "Using S6 arch suffix: ${S6_ARCH_SUFFIX}" && \
