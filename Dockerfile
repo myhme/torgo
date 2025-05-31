@@ -37,7 +37,6 @@ RUN addgroup -S _tor && \
     adduser -S -G _tor -h /var/lib/tor -s /sbin/nologin _tor && \
     mkdir -p /var/lib/tor /var/run/tor /etc/tor && \
     chown -R _tor:_tor /var/lib/tor /var/run/tor
-    # /etc/tor will be owned by root, torrc files written by root in entrypoint
 
 EXPOSE 8080
 # Torgo API
