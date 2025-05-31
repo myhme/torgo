@@ -18,7 +18,7 @@ ClientOnly 1
 # ORPort 0 # Explicitly disable relaying
 # DirPort 0 # Explicitly disable directory services
 
-User _tor # Tor process will run as this user
+# User _tor # <<--- THIS LINE SHOULD BE COMMENTED OUT OR REMOVED
 
 SafeLogging 1 # Scrubs IPs from logs
 
