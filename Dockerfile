@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -a -installsuffix cgo -o 
 FROM alpine:latest
 
 # Install Tor, Privoxy, Tini, and ca-certificates (for HTTPS calls by torgo/Tor)
-RUN apk add --no-cache tor privoxy tini ca-certificates
+RUN apk add --no-cache tor privoxy tini ca-certificates su-exec
 
 WORKDIR /app
 
