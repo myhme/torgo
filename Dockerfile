@@ -1,5 +1,5 @@
 # Stage 1: Build the Go application
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -39,11 +39,16 @@ RUN addgroup -S _tor && \
     chown -R _tor:_tor /var/lib/tor /var/run/tor
     # /etc/tor will be owned by root, torrc files written by root in entrypoint
 
-EXPOSE 8080 # Torgo API
-EXPOSE 9000 # Torgo SOCKS (used by Privoxy)
-EXPOSE 5300/tcp # Torgo DNS
-EXPOSE 5300/udp # Torgo DNS
-EXPOSE 8118 # Privoxy HTTP
+EXPOSE 8080
+# Torgo API
+EXPOSE 9000
+# Torgo SOCKS (used by Privoxy)
+EXPOSE 5300/tcp
+# Torgo DNS
+EXPOSE 5300/udp
+# Torgo DNS
+EXPOSE 8118
+# Privoxy HTTP
 
 HEALTHCHECK --interval=1m --timeout=15s --start-period=2m --retries=3 \
   CMD ["/usr/local/bin/docker-healthcheck.sh"]

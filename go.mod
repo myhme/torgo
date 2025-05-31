@@ -1,6 +1,6 @@
 module torgo
 
-go 1.21
+go 1.24
 
 require (
 	github.com/miekg/dns v1.1.66
@@ -19,3 +19,6 @@ require (
 // indirect dependencies of golang.org/x/net or other packages.
 // Running `go mod tidy` will ensure your go.sum is also updated
 // and that the versions of indirect dependencies are consistent.
+
+
+
