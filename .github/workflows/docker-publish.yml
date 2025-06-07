@@ -66,7 +66,7 @@ jobs:
         with:
           context: . 
           file: ./Dockerfile 
-          platforms: linux/arm64 # Added platforms
+          platforms: linux/arm64,linux/amd64 # Added platforms
           push: true 
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
