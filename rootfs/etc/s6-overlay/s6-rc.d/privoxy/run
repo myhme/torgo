@@ -3,8 +3,27 @@ set -e
 echo "--- S6 Service: Starting Privoxy ---"
 # Configure Privoxy just before starting it
 PRIVOXY_CONFIG_FILE="/etc/privoxy/config"
-cp "/etc/privoxy/privoxy.conf.template" "${PRIVOXY_CONFIG_FILE}"
-sed -i "s|__LOG_LEVEL__|${PRIVOXY_LOG_LEVEL:-0}|g" "${PRIVOXY_CONFIG_FILE}"
+
+# --- CORRECTED Privoxy Configuration ---
+# This configuration is compatible with the version of Privoxy from the
+# Alpine package repository and specifies the full paths to action files.
+cat > ${PRIVOXY_CONFIG_FILE} <<EOP
+# --- Core Settings ---
+listen-address  [::]:8118
+listen-address  0.0.0.0:8118
+confdir /etc/privoxy
+logdir /var/log/privoxy
+
+# --- Forwarding ---
+forward-socks5t / torgo:9000 .
+
+# --- Action Files (with full paths) ---
+actionsfile default.action
+actionsfile user.action
+
+# --- Logging ---
+debug ${PRIVOXY_LOG_LEVEL:-0}
+EOP
 
 # Use exec to hand control over to privoxy
 exec privoxy --no-daemon "${PRIVOXY_CONFIG_FILE}"
