@@ -1,4 +1,23 @@
 #!/command/with-contenv bash
-# S6 run script for the main torgo Go application
-echo "--- S6 Service: Starting torgo-app ---"
+set -e
+echo "--- S6 Service: Waiting for Tor daemons to be ready... ---"
+
+# This is a crucial step: wait for the Tor daemons to create their cookie files
+# before starting the Go app that needs to connect to them.
+# The `tor-daemons` service must finish its startup sequence first.
+# We'll poll for the last instance's cookie file.
+TOR_INSTANCES=${TOR_INSTANCES:-1}
+LAST_COOKIE_FILE="/var/lib/tor/instance${TOR_INSTANCES}/control_auth_cookie"
+WAIT_SECONDS=60
+while [ ! -f "${LAST_COOKIE_FILE}" ] && [ $WAIT_SECONDS -gt 0 ]; do
+  sleep 1
+  WAIT_SECONDS=$((WAIT_SECONDS - 1))
+done
+
+if [ ! -f "${LAST_COOKIE_FILE}" ]; then
+  echo "FATAL: Timed out waiting for Tor daemons to become ready."
+  exit 1
+fi
+
+echo "--- S6 Service: Tor daemons are ready. Starting torgo-app. ---"
 exec /app/torgo-app

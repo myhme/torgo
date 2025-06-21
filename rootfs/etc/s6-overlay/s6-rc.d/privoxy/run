@@ -1,4 +1,10 @@
 #!/command/with-contenv bash
-# S6 run script for the Privoxy service
+set -e
 echo "--- S6 Service: Starting Privoxy ---"
-exec privoxy --no-daemon /etc/privoxy/config
+# Configure Privoxy just before starting it
+PRIVOXY_CONFIG_FILE="/etc/privoxy/config"
+cp "/etc/privoxy/privoxy.conf.template" "${PRIVOXY_CONFIG_FILE}"
+sed -i "s|__LOG_LEVEL__|${PRIVOXY_LOG_LEVEL:-0}|g" "${PRIVOXY_CONFIG_FILE}"
+
+# Use exec to hand control over to privoxy
+exec privoxy --no-daemon "${PRIVOXY_CONFIG_FILE}"

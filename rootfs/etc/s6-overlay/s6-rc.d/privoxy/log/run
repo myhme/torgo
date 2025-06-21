@@ -1,3 +1,2 @@
 #!/command/execlineb -P
-# Standard S6 logging script for the Privoxy service.
 s6-log -b n20 s1000000 T /var/log/privoxy
