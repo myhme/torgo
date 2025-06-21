@@ -1,0 +1,4 @@
+#!/command/with-contenv bash
+# S6 run script for the main torgo Go application
+echo "--- S6 Service: Starting torgo-app ---"
+exec /app/torgo-app

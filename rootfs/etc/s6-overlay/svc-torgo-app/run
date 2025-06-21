@@ -1,7 +1,0 @@
-#!/command/with-contenv bash
-# S6 run script for the main torgo Go application
-
-echo "--- S6 Service: Starting torgo-app ---"
-# Use exec to replace the shell process with the go application process.
-# S6 will directly manage the torgo-app process and restart it if it fails.
-exec /app/torgo-app

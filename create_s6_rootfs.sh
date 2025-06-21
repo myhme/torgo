@@ -1,3 +1,43 @@
+#!/bin/bash
+#
+# create_s6_rootfs.sh
+#
+# This script automatically generates the entire S6 overlay directory structure
+# for the torgo project, including all necessary service files and permissions.
+# Run this script from the root of the torgo project directory.
+
+set -e
+
+# --- Configuration ---
+ROOTFS_DIR="rootfs"
+BASE_DIR="${ROOTFS_DIR}/etc/s6-overlay"
+
+# --- Main Script ---
+
+echo "--- Generating S6 Overlay rootfs for torgo ---"
+
+# Clean up any previous structure to ensure a fresh start
+if [ -d "$ROOTFS_DIR" ]; then
+    echo "Removing existing rootfs directory..."
+    rm -rf "$ROOTFS_DIR"
+fi
+
+echo "Creating directory structure..."
+
+# Create the core directories
+mkdir -p "${BASE_DIR}/cont-init.d"
+mkdir -p "${BASE_DIR}/s6-rc.d/user/contents.d"
+mkdir -p "${BASE_DIR}/s6-rc.d/privoxy/dependencies.d"
+mkdir -p "${BASE_DIR}/s6-rc.d/privoxy/log"
+mkdir -p "${BASE_DIR}/s6-rc.d/torgo-app/dependencies.d"
+mkdir -p "${BASE_DIR}/s6-rc.d/torgo-app/log"
+
+# --- Create Files ---
+
+echo "Writing S6 service files..."
+
+# 1. Cont-init script (one-time setup)
+cat > "${BASE_DIR}/cont-init.d/01-tor-setup" <<'EOF'
 #!/command/with-contenv bash
 # S6 Overlay Initializer Script for torgo
 
@@ -121,3 +161,63 @@ if [ "${ALL_COOKIES_READY}" -eq 0 ]; then
 fi
 
 echo "--- S6 Init: Environment setup complete. Handing over to S6 service manager. ---"
+EOF
+
+# 2. Privoxy Service
+cat > "${BASE_DIR}/s6-rc.d/privoxy/type" <<'EOF'
+longrun
+EOF
+
+cat > "${BASE_DIR}/s6-rc.d/privoxy/run" <<'EOF'
+#!/command/with-contenv bash
+# S6 run script for the Privoxy service
+echo "--- S6 Service: Starting Privoxy ---"
+exec privoxy --no-daemon /etc/privoxy/config
+EOF
+
+cat > "${BASE_DIR}/s6-rc.d/privoxy/log/run" <<'EOF'
+#!/command/execlineb -P
+# Standard S6 logging script for the Privoxy service.
+s6-log -b n20 s1000000 T /var/log/privoxy
+EOF
+
+touch "${BASE_DIR}/s6-rc.d/privoxy/dependencies.d/base"
+
+# 3. Torgo-App Service
+cat > "${BASE_DIR}/s6-rc.d/torgo-app/type" <<'EOF'
+longrun
+EOF
+
+cat > "${BASE_DIR}/s6-rc.d/torgo-app/run" <<'EOF'
+#!/command/with-contenv bash
+# S6 run script for the main torgo Go application
+echo "--- S6 Service: Starting torgo-app ---"
+exec /app/torgo-app
+EOF
+
+cat > "${BASE_DIR}/s6-rc.d/torgo-app/log/run" <<'EOF'
+#!/command/execlineb -P
+# Standard S6 logging script for the torgo-app service.
+s6-log -b n20 s1000000 T /var/log/torgo-app
+EOF
+
+touch "${BASE_DIR}/s6-rc.d/torgo-app/dependencies.d/base"
+
+# 4. Enable services in the user bundle
+touch "${BASE_DIR}/s6-rc.d/user/contents.d/privoxy"
+touch "${BASE_DIR}/s6-rc.d/user/contents.d/torgo-app"
+
+
+# --- Set Permissions ---
+echo "Setting executable permissions..."
+chmod +x "${BASE_DIR}/cont-init.d/01-tor-setup"
+chmod +x "${BASE_DIR}/s6-rc.d/privoxy/run"
+chmod +x "${BASE_DIR}/s6-rc.d/privoxy/log/run"
+chmod +x "${BASE_DIR}/s6-rc.d/torgo-app/run"
+chmod +x "${BASE_DIR}/s6-rc.d/torgo-app/log/run"
+
+
+echo ""
+echo "✅ S6 rootfs directory structure created successfully!"
+echo "You can now build your Docker image."
+

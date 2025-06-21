@@ -30,6 +30,30 @@ torgo/
 ├── cmd/
 │   └── torgo/
 │       └── main.go
+├── rootfs/
+│   └── etc/
+│       └── s6-overlay/
+│           ├── cont-init.d/
+│           │   └── 01-tor-setup
+│           └── s6-rc.d/
+│               ├── privoxy/
+│               │   ├── dependencies.d/
+│               │   │   └── base
+│               │   ├── log/
+│               │   │   └── run
+│               │   ├── run
+│               │   └── type
+│               ├── torgo-app/
+│               │   ├── dependencies.d/
+│               │   │   └── base
+│               │   ├── log/
+│               │   │   └── run
+│               │   ├── run
+│               │   └── type
+│               └── user/
+│                   └── contents.d/
+│                       ├── privoxy
+│    
 └── internal/
     ├── api/
     │   ├── handlers.go
@@ -53,6 +77,8 @@ torgo/
     │   └── proxy.go
     └── tor/
         └── instance.go
+                   └── torgo-app
+
 ```
 
 ## Operating Modes

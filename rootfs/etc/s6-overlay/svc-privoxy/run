@@ -1,7 +1,0 @@
-#!/command/with-contenv bash
-# S6 run script for the Privoxy service
-
-echo "--- S6 Service: Starting Privoxy ---"
-# Use exec to replace the shell process with the privoxy process.
-# S6 will directly manage the privoxy process and restart it if it fails.
-exec privoxy --no-daemon /etc/privoxy/config
