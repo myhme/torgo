@@ -19,7 +19,9 @@ func RegisterWebUIHandlers(mux *http.ServeMux) {
 	fileServer := http.FileServer(http.FS(actualUI_FS))
 	mux.HandleFunc("/webui/", func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/webui/")
-		if p == "" { p = "/" }
+		if p == "" {
+			p = "/"
+		}
 		r.URL.Path = p
 		fileServer.ServeHTTP(w, r)
 	})

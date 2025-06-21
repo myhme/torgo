@@ -1,15 +1,22 @@
 #!/bin/sh
 set -e
-COMMON_SOCKS_PORT=${COMMON_SOCKS_PROXY_PORT:-9000}
-PROXY_ADDRESS="127.0.0.1:${COMMON_SOCKS_PORT}"
-IP_CHECK_URL=${IP_CHECK_URL:-https://check.torproject.org/api/ip}
-CURL_CONNECT_TIMEOUT=10; CURL_MAX_TIME=15; TMP_OUTPUT=$(mktemp); CURL_EXIT_CODE=0
-echo "Health check: Probing ${IP_CHECK_URL} via SOCKS5 ${PROXY_ADDRESS}..."
-set +e
-curl -sf --socks5-hostname "${PROXY_ADDRESS}" --connect-timeout "${CURL_CONNECT_TIMEOUT}" --max-time "${CURL_MAX_TIME}" "${IP_CHECK_URL}" > "${TMP_OUTPUT}"
-CURL_EXIT_CODE=$?
-set -e
-if [ ${CURL_EXIT_CODE} -eq 0 ]; then
-  if grep -q '"IsTor":true' "${TMP_OUTPUT}"; then echo "Health check: PASSED"; rm -f "${TMP_OUTPUT}"; exit 0
-  else echo "Health check: FAILED - Response no Tor."; cat "${TMP_OUTPUT}"; rm -f "${TMP_OUTPUT}"; exit 1; fi
-else echo "Health check: FAILED - curl code ${CURL_EXIT_CODE}."; cat "${TMP_OUTPUT}"; rm -f "${TMP_OUTPUT}"; exit 1; fi
+
+# This health check now calls the application's built-in health endpoint.
+# This is more reliable as it checks if the core logic is operational and
+# can find a healthy backend Tor instance.
+
+API_PORT=${API_PORT:-8080}
+HEALTH_URL="http://127.0.0.1:${API_PORT}/api/v1/healthz"
+CURL_TIMEOUT=10
+
+echo "Health check: Probing built-in health endpoint at ${HEALTH_URL}"
+
+# Use curl to check the endpoint. --fail causes curl to exit with an error
+# for HTTP status codes >= 400.
+if curl --silent --fail --max-time "${CURL_TIMEOUT}" "${HEALTH_URL}"; then
+    echo "Health check: PASSED."
+    exit 0
+else
+    echo "Health check: FAILED. The /healthz endpoint reported an unhealthy status or timed out."
+    exit 1
+fi

@@ -1,0 +1,35 @@
+# ----------------------------------------------------------------
+# torgo - Privoxy Configuration Template
+# ----------------------------------------------------------------
+
+# --- Core Settings ---
+# Listen on all interfaces inside the container on port 8118
+listen-address  [::]:8118
+listen-address  0.0.0.0:8118
+
+# --- Forwarding ---
+# Forward all SOCKS traffic to the torgo SOCKS5 load balancer.
+# The '.' means this forwarding rule applies to all destinations.
+forward-socks5t / torgo:9000 .
+
+# --- Security & Privacy ---
+# Don't advertise the Privoxy version number in HTTP headers.
+show-version 0
+
+# Don't show the "Forwarded-for" header.
+# This prevents the destination from seeing that a proxy was used.
+hide-forwarded-for
+
+# Don't allow "proxy-bypassing" headers from the client browser.
+prevent-client-proxy-bypassing 1
+
+# --- Action Files ---
+# These files contain rules to block ads, trackers, and other unwanted content.
+# The default actionsfile provides a great baseline for privacy.
+actionsfile default.action
+actionsfile user.action
+
+# --- Logging ---
+# Log level will be replaced by the entrypoint script.
+# e.g., 0 for quiet, 1 for startup/fatal, 512 for blocked URLs.
+debug __LOG_LEVEL__

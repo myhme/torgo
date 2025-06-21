@@ -1,175 +1,142 @@
 #!/bin/bash
-# Entrypoint script for torgo: Starts Tor instances, Privoxy, and the torgo Go application.
-# Uses bash for easier scripting.
-
-set -e # Exit immediately if a command exits with a non-zero status.
-set -o pipefail # Causes pipelines to fail if any command fails
+set -e
+set -o pipefail
 
 echo "--- Torgo Entrypoint Starting ---"
 
-# --- Configuration Defaults ---
-SOCKS_BASE_PORT_DEFAULT=9050
-CONTROL_BASE_PORT_DEFAULT=9160
-DNS_BASE_PORT_DEFAULT=9200 # For individual Tor instance's DNSPort
+# --- Function to Setup Transparent Proxy ---
+setup_transparent_proxy() {
+    echo "--- Enabling Transparent Proxy Mode ---"
+    # Flush existing rules
+    iptables -t nat -F
+    
+    # Create a new chain for Tor redirection
+    iptables -t nat -N TOR_REDIR
+    
+    # --- Redirect DNS ---
+    # Redirect all DNS requests (TCP/UDP port 53) to torgo's internal DNS proxy
+    DNSPort=${COMMON_DNS_PROXY_PORT:-5300}
+    iptables -t nat -A TOR_REDIR -p udp --dport 53 -j REDIRECT --to-ports "${DNSPort}"
+    iptables -t nat -A TOR_REDIR -p tcp --dport 53 -j REDIRECT --to-ports "${DNSPort}"
+    
+    # --- Redirect TCP traffic ---
+    # Redirect all other TCP traffic to the Privoxy HTTP proxy, which then sends it to Tor.
+    # Privoxy is used because it can handle converting HTTP requests to SOCKS5.
+    HTTPPort=${PRIVOXY_HTTP_PORT:-8118}
+    iptables -t nat -A TOR_REDIR -p tcp --syn -j REDIRECT --to-ports "${HTTPPort}"
 
+    # Apply the TOR_REDIR chain to all outgoing traffic from this network namespace
+    # This captures traffic from containers using 'network_mode: service:torgo'
+    iptables -t nat -A PREROUTING -j TOR_REDIR
+    
+    echo "iptables rules configured for transparent redirection."
+}
+
+
+# --- Environment Variable Processing ---
+export TOR_INSTANCES=${TOR_INSTANCES:-1}
+SOCKS_BASE_PORT_CONFIGURED=${SOCKS_BASE_PORT_CONFIGURED:-9050}
+CONTROL_BASE_PORT_CONFIGURED=${CONTROL_BASE_PORT_CONFIGURED:-9160}
+DNS_BASE_PORT_CONFIGURED=${DNS_BASE_PORT_CONFIGURED:-9200}
 TOR_USER="_tor"
 TOR_GROUP="_tor"
 TOR_DATA_BASE_DIR="/var/lib/tor"
 TOR_RUN_DIR="/var/run/tor"
-TORRC_TEMPLATE="/etc/tor/torrc.template"
+TORRC_TEMPLATE_PATH="/etc/tor/torrc.template"
 TORRC_DIR="/etc/tor"
 
-PRIVOXY_CONFIG_FILE="/etc/privoxy/config"
 
-# --- Environment Variable Processing for Torgo App & Tor Setup ---
-# These are primarily for the Go application, read via os.Getenv.
-# Defaults are set in config.LoadConfig() in Go if not provided here.
-# Exporting them makes them available to the Go app.
-export TOR_INSTANCES=${TOR_INSTANCES:-1}
-export SOCKS_BASE_PORT_CONFIGURED=${SOCKS_BASE_PORT_CONFIGURED:-$SOCKS_BASE_PORT_DEFAULT}
-export CONTROL_BASE_PORT_CONFIGURED=${CONTROL_BASE_PORT_CONFIGURED:-$CONTROL_BASE_PORT_DEFAULT}
-export DNS_BASE_PORT_CONFIGURED=${DNS_BASE_PORT_CONFIGURED:-$DNS_BASE_PORT_DEFAULT}
-# Common ports for torgo's proxies and API (Go app will use defaults if not set)
-export COMMON_SOCKS_PROXY_PORT=${COMMON_SOCKS_PROXY_PORT}
-export COMMON_DNS_PROXY_PORT=${COMMON_DNS_PROXY_PORT}
-export API_PORT=${API_PORT}
-# Other operational parameters for torgo (Go app will use defaults if not set)
-export ROTATION_STAGGER_DELAY_SECONDS=${ROTATION_STAGGER_DELAY_SECONDS}
-export HEALTH_CHECK_INTERVAL_SECONDS=${HEALTH_CHECK_INTERVAL_SECONDS}
-# ... and so on for all ENVs read by config.LoadConfig()
+# --- Transparent Proxy Activation ---
+if [ "${TORGO_TRANSPARENT_PROXY}" = "true" ]; then
+    setup_transparent_proxy
+fi
+
+
+# --- Privoxy Dynamic Configuration ---
+echo "--- Configuring Privoxy ---"
+PRIVOXY_TEMPLATE_PATH="/etc/privoxy/privoxy.conf.template"
+PRIVOXY_CONFIG_FILE="/etc/privoxy/config"
+cp "${PRIVOXY_TEMPLATE_PATH}" "${PRIVOXY_CONFIG_FILE}"
+sed -i "s|__LOG_LEVEL__|${PRIVOXY_LOG_LEVEL:-0}|g" "${PRIVOXY_CONFIG_FILE}"
+echo "Privoxy log level set to: ${PRIVOXY_LOG_LEVEL:-0}"
+
 
 # --- Tor Instance Setup ---
-N_INSTANCES_TO_START=$TOR_INSTANCES # Use the value that will be passed to Go app
-if ! [[ "$N_INSTANCES_TO_START" =~ ^[0-9]+$ ]] || [ "$N_INSTANCES_TO_START" -lt 1 ]; then
-    echo "Warning: Invalid TOR_INSTANCES value: '$N_INSTANCES_TO_START'. Defaulting to 1 for Tor setup."
-    N_INSTANCES_TO_START=1
+if ! [[ "$TOR_INSTANCES" =~ ^[0-9]+$ ]] || [ "$TOR_INSTANCES" -lt 1 ]; then
+    echo "Warning: Invalid TOR_INSTANCES value: '$TOR_INSTANCES'. Defaulting to 1."
+    TOR_INSTANCES=1
 fi
+echo "--- Preparing to start $TOR_INSTANCES Tor instance(s) ---"
+mkdir -p "$TOR_RUN_DIR" "$TOR_DATA_BASE_DIR"
+chown -R "${TOR_USER}:${TOR_GROUP}" "$TOR_RUN_DIR" "$TOR_DATA_BASE_DIR"
+chmod 700 "$TOR_RUN_DIR" "$TOR_DATA_BASE_DIR"
 
-echo "--- Preparing to start $N_INSTANCES_TO_START Tor instance(s) ---"
-echo "SOCKS Base Port: $SOCKS_BASE_PORT_CONFIGURED"
-echo "Control Base Port: $CONTROL_BASE_PORT_CONFIGURED"
-echo "Tor Instance DNS Base Port: $DNS_BASE_PORT_CONFIGURED"
-
-# Ensure _tor user and group exist (apk add tor should create them)
-if ! getent group _tor > /dev/null; then echo "Creating group _tor"; addgroup -S _tor; fi
-if ! getent passwd _tor > /dev/null; then echo "Creating user _tor"; adduser -S -G _tor -h /var/lib/tor -s /sbin/nologin _tor; fi
-
-# Ensure Tor run directory exists and has correct permissions
-mkdir -p "$TOR_RUN_DIR"
-chown "${TOR_USER}:${TOR_GROUP}" "$TOR_RUN_DIR"
-chmod 700 "$TOR_RUN_DIR"
-
-# Ensure Tor base data directory exists and has correct permissions
-if [ ! -d "$TOR_DATA_BASE_DIR" ]; then
-    mkdir -p "$TOR_DATA_BASE_DIR"
-fi
-# Ensure _tor owns the base data directory.
-# This is important if the volume was mounted from host with different ownership.
-if [ "$(stat -c '%U' "$TOR_DATA_BASE_DIR")" != "$TOR_USER" ]; then
-    echo "Setting ownership of $TOR_DATA_BASE_DIR to $TOR_USER:$TOR_GROUP"
-    chown -R "${TOR_USER}:${TOR_GROUP}" "$TOR_DATA_BASE_DIR"
-fi
-chmod 700 "$TOR_DATA_BASE_DIR"
-
-# Loop to configure and start each Tor instance
-for i in $(seq 1 "$N_INSTANCES_TO_START"); do
+for i in $(seq 1 "$TOR_INSTANCES"); do
     INSTANCE_NAME="instance${i}"
     DATA_DIR="${TOR_DATA_BASE_DIR}/${INSTANCE_NAME}"
     PID_FILE="${TOR_RUN_DIR}/tor.${INSTANCE_NAME}.pid"
     TORRC_FILE="${TORRC_DIR}/torrc.${INSTANCE_NAME}"
-
     CURRENT_SOCKS_PORT=$((SOCKS_BASE_PORT_CONFIGURED + i))
     CURRENT_CONTROL_PORT=$((CONTROL_BASE_PORT_CONFIGURED + i))
     CURRENT_DNS_PORT=$((DNS_BASE_PORT_CONFIGURED + i))
 
-    echo "Setting up Tor instance $i:"
-    echo "  DataDir: $DATA_DIR"
-    echo "  SocksPort: 127.0.0.1:$CURRENT_SOCKS_PORT"
-    echo "  ControlPort: 127.0.0.1:$CURRENT_CONTROL_PORT"
-    echo "  DNSPort: 127.0.0.1:$CURRENT_DNS_PORT"
-    echo "  Torrc: $TORRC_FILE"
-    # PID_FILE is specified in torrc, Tor will manage it.
-
+    echo "Setting up Tor instance $i..."
     mkdir -p "$DATA_DIR"
-    # Tor itself will create files in DataDir as _tor user.
-    # We ensure the parent DataDir ($DATA_DIR) is owned by _tor.
     chown -R "${TOR_USER}:${TOR_GROUP}" "$DATA_DIR"
     chmod 700 "$DATA_DIR"
 
+    EXTRA_OPTIONS=""
+    if [ -n "$TOR_EXIT_NODES" ]; then
+        EXTRA_OPTIONS="${EXTRA_OPTIONS}ExitNodes $TOR_EXIT_NODES\nStrictNodes 1\n"
+    fi
+    if [ -n "$TOR_MAX_CIRCUIT_DURTINESS" ]; then
+        EXTRA_OPTIONS="${EXTRA_OPTIONS}MaxCircuitDirtiness $TOR_MAX_CIRCUIT_DURTINESS\n"
+    fi
+    
+    TMP_TEMPLATE=$(mktemp)
+    sed "s|__EXTRA_TOR_OPTIONS__|${EXTRA_OPTIONS}|g" "${TORRC_TEMPLATE_PATH}" > "${TMP_TEMPLATE}"
+    
     sed -e "s|__DATADIR__|${DATA_DIR}|g" \
         -e "s|__SOCKSPORT__|127.0.0.1:${CURRENT_SOCKS_PORT}|g" \
         -e "s|__CONTROLPORT__|127.0.0.1:${CURRENT_CONTROL_PORT}|g" \
         -e "s|__DNSPORT__|127.0.0.1:${CURRENT_DNS_PORT}|g" \
         -e "s|__PIDFILE__|${PID_FILE}|g" \
-        "${TORRC_TEMPLATE}" > "${TORRC_FILE}"
-    chmod 644 "${TORRC_FILE}" # Readable by _tor, owned by root (as script runs as root)
+        "${TMP_TEMPLATE}" > "${TORRC_FILE}"
+    rm "${TMP_TEMPLATE}"
+    chmod 644 "${TORRC_FILE}"
 
-    echo "Verifying config for Tor instance $i (using: $TORRC_FILE)..."
-    # Run verification as _tor user
     if su-exec "${TOR_USER}" tor -f "$TORRC_FILE" --verify-config; then
-        echo "Starting Tor instance $i (using: $TORRC_FILE)..."
-        # Start Tor as the _tor user, in the background
+        echo "Starting Tor instance $i..."
         su-exec "${TOR_USER}" tor -f "$TORRC_FILE" &
     else
         echo "FATAL: Configuration verification failed for Tor instance $i."
-        echo "Contents of $TORRC_FILE:"
-        cat "$TORRC_FILE"
-        exit 1 # Exit if any Tor instance fails to configure
+        exit 1
     fi
 done
 
-echo "--- Waiting for all Tor instances to initialize control cookies ---"
-ALL_COOKIES_READY=0
-WAIT_ATTEMPTS=0
-MAX_WAIT_ATTEMPTS=120 # Increased wait time
-
+echo "--- Waiting for all Tor instances to initialize... ---"
+ALL_COOKIES_READY=0; WAIT_ATTEMPTS=0; MAX_WAIT_ATTEMPTS=120
 while [ "${ALL_COOKIES_READY}" -eq 0 ] && [ "${WAIT_ATTEMPTS}" -lt "${MAX_WAIT_ATTEMPTS}" ]; do
     ALL_COOKIES_READY=1
-    for i in $(seq 1 "$N_INSTANCES_TO_START"); do
-        COOKIE_PATH="${TOR_DATA_BASE_DIR}/instance${i}/control_auth_cookie"
-        if [ ! -f "${COOKIE_PATH}" ]; then
-            ALL_COOKIES_READY=0
-            break
+    for i in $(seq 1 "$TOR_INSTANCES"); do
+        if [ ! -f "${TOR_DATA_BASE_DIR}/instance${i}/control_auth_cookie" ]; then
+            ALL_COOKIES_READY=0; break
         fi
     done
     if [ "${ALL_COOKIES_READY}" -eq 0 ]; then
-        sleep 1
-        WAIT_ATTEMPTS=$((WAIT_ATTEMPTS + 1))
-        if [ $((WAIT_ATTEMPTS % 10)) -eq 0 ]; then
-             echo "Still waiting for Tor control cookies... (Attempt ${WAIT_ATTEMPTS}/${MAX_WAIT_ATTEMPTS})"
-        fi
+        sleep 1; WAIT_ATTEMPTS=$((WAIT_ATTEMPTS + 1))
     fi
 done
 
 if [ "${ALL_COOKIES_READY}" -eq 0 ]; then
     echo "FATAL: Not all Tor control cookies were found after ${MAX_WAIT_ATTEMPTS} seconds."
-    for i in $(seq 1 "$N_INSTANCES_TO_START"); do
-        COOKIE_PATH="${TOR_DATA_BASE_DIR}/instance${i}/control_auth_cookie"
-        if [ ! -f "$COOKIE_PATH" ]; then
-            echo "Missing cookie for instance $i: $COOKIE_PATH"
-        fi
-    done
-    ps aux | grep tor # Show running tor processes for debugging
     exit 1
 fi
-echo "--- All Tor control cookies found. Tor instances should be running. ---"
+echo "--- All Tor instances appear ready. ---"
 
-# --- Start Privoxy ---
 echo "--- Starting Privoxy in the background ---"
-# Privoxy will run as root by default if not specified otherwise in its config or here.
-# The --no-daemon flag keeps it in the foreground relative to its own process management,
-# but we background it here with '&'. Tini will manage it.
 privoxy --no-daemon "$PRIVOXY_CONFIG_FILE" &
-PRIVOXY_PID=$!
-echo "Privoxy started with PID $PRIVOXY_PID. Config: $PRIVOXY_CONFIG_FILE"
-sleep 1 # Brief pause for Privoxy to bind port
+sleep 1
 
-# --- Start Torgo Go Application ---
 echo "--- Starting Go 'torgo' application (main process) ---"
-# Use exec to replace the shell process with the Go app.
-# Tini (as PID 1) will then directly manage torgo-app.
 exec /app/torgo-app
-
-# If torgo-app exits, Tini will ensure other direct children (like the shell that launched background jobs)
-# are handled, and then Tini itself will exit, causing the container to stop.
-# Backgrounded Tor and Privoxy processes will receive signals from Tini upon container stop.

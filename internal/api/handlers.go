@@ -14,12 +14,36 @@ import (
 	"time"
 
 	"torgo/internal/config"
+	"torgo/internal/lb"
 	"torgo/internal/tor"
 )
 
+// HealthzHandler provides a simple, built-in health check endpoint.
+// It returns 200 OK if the load balancer can find at least one healthy backend instance.
+// Otherwise, it returns 503 Service Unavailable.
+func HealthzHandler(w http.ResponseWriter, r *http.Request, instances []*tor.Instance) {
+	_, err := lb.GetNextHealthyInstance(instances)
+	if err != nil {
+		http.Error(w, "Service Unavailable: No healthy backend instances.", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintln(w, "OK")
+}
+
 func RegisterAPIHandlers(mux *http.ServeMux, instances []*tor.Instance, appCfg *config.AppConfig) {
-	mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
+	// This is the main API router function that will be registered.
+	masterRouter := func(w http.ResponseWriter, r *http.Request) {
 		MasterAPIRouter(w, r, instances, appCfg)
+	}
+
+	// Register the master router for all /api/v1/ paths.
+	mux.HandleFunc("/api/v1/", masterRouter)
+
+	// Separately register the new healthz handler.
+	mux.HandleFunc("/api/v1/healthz", func(w http.ResponseWriter, r *http.Request) {
+		HealthzHandler(w, r, instances)
 	})
 }
 
@@ -125,6 +149,7 @@ func rotateAllStaggeredHandler(w http.ResponseWriter, r *http.Request, instances
 
 func MasterAPIRouter(w http.ResponseWriter, r *http.Request, instances []*tor.Instance, appCfg *config.AppConfig) {
 	path := r.URL.Path
+	
 	if path == "/api/v1/app-details" { AppDetailsHandler(w, r, appCfg); return }
 	if path == "/api/v1/rotate-all-staggered" {
 		if r.Method == http.MethodPost || r.Method == http.MethodGet {

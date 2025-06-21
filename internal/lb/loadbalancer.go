@@ -2,25 +2,32 @@ package lb
 
 import (
 	"fmt"
-	"math/rand"
-	"sync"
-	"time"
+	"sync/atomic"
 
 	"torgo/internal/tor"
 )
 
 var (
-	seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
-	randLock   sync.Mutex
+	counter uint64
 )
 
 func GetNextHealthyInstance(instances []*tor.Instance) (*tor.Instance, error) {
-	if len(instances) == 0 { return nil, fmt.Errorf("loadbalancer: no instances") }
-	healthyInstances := make([]*tor.Instance, 0, len(instances))
-	for _, instance := range instances {
-		if instance.IsCurrentlyHealthy() { healthyInstances = append(healthyInstances, instance) }
+	if len(instances) == 0 {
+		return nil, fmt.Errorf("loadbalancer: no instances provided")
 	}
-	if len(healthyInstances) == 0 { return nil, fmt.Errorf("loadbalancer: no healthy instances") }
-	randLock.Lock(); randomIndex := seededRand.Intn(len(healthyInstances)); randLock.Unlock()
-	return healthyInstances[randomIndex], nil
+
+	eligibleInstances := make([]*tor.Instance, 0, len(instances))
+	for _, instance := range instances {
+		if instance.IsCurrentlyHealthy() && !instance.IsDraining() {
+			eligibleInstances = append(eligibleInstances, instance)
+		}
+	}
+
+	eligibleCount := len(eligibleInstances)
+	if eligibleCount == 0 {
+		return nil, fmt.Errorf("loadbalancer: no healthy and non-draining instances available")
+	}
+
+	nextIndex := atomic.AddUint64(&counter, 1) % uint64(eligibleCount)
+	return eligibleInstances[nextIndex], nil
 }
