@@ -1,5 +1,5 @@
 # Stage 1: Build the Go application
-FROM golang:1.24-alpine AS builder
+FROM golang:1.21-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -13,8 +13,9 @@ FROM alpine:latest
 # --- S6-Overlay Installation ---
 # Set S6-Overlay version
 ENV S6_OVERLAY_VERSION=v3.2.1.0
+ENV ARCH=amd64
 
-# Install runtime dependencies, including curl for downloading S6
+# Install runtime dependencies.
 RUN apk add --no-cache \
     tor \
     privoxy \
@@ -23,20 +24,11 @@ RUN apk add --no-cache \
     bash \
     curl
 
-# Use Docker's automatic build-time argument `TARGETARCH` to determine architecture
-ARG TARGETARCH
-
-# Download and install S6-Overlay for the correct target architecture
-RUN case ${TARGETARCH} in \
-        amd64) S6_ARCH="x86_64" ;; \
-        arm64) S6_ARCH="aarch64" ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac && \
-    echo "Downloading S6-Overlay for architecture: ${TARGETARCH} -> ${S6_ARCH}" && \
-    curl -L -s https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz -o /tmp/s6-overlay-noarch.tar.xz && \
-    curl -L -s https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-${S6_ARCH}.tar.xz -o /tmp/s6-overlay.tar.xz && \
-    tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz && \
-    tar -C / -Jxpf /tmp/s6-overlay.tar.xz && \
+# Add S6-Overlay from GitHub, which is the official installation method.
+ADD https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp/
+ADD https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-${ARCH}.tar.xz /tmp/
+RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz && \
+    tar -C / -Jxpf /tmp/s6-overlay-${ARCH}.tar.xz && \
     rm -rf /tmp/*
 
 
@@ -50,8 +42,8 @@ RUN chmod +x /app/docker-healthcheck.sh
 
 
 # --- S6-Overlay Service Configuration ---
-# Copy the entire rootfs structure, which contains all service definitions,
-# into the root of the image.
+# Copy the entire rootfs structure, which contains all service definitions
+# (including the crucial 'up' files), into the root of the image.
 COPY rootfs/ /
 
 
