@@ -1,5 +1,5 @@
 # Stage 1: Build the Go application
-FROM golang:1.24-alpine AS builder
+FROM golang:1.21-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -27,7 +27,7 @@ RUN apk add --no-cache \
 ARG TARGETARCH
 
 # Download and install S6-Overlay for the correct target architecture
-# This block correctly maps amd64 -> x86_64
+# This block correctly maps amd64 -> x86_64 as per the official documentation
 RUN case ${TARGETARCH} in \
         amd64) S6_ARCH="x86_64" ;; \
         arm64) S6_ARCH="aarch64" ;; \
