@@ -1,3 +1,4 @@
-#!/bin/sh
-# Simple S6 logger for torgo-app: pipe service stdout/stderr to this script's stdout
-exec cat
+#!/command/execlineb -P
+# Standard S6 logging script for the torgo-app service.
+
+s6-log -b n20 s1000000 T /var/log/torgo-app

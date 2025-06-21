@@ -1,4 +1,9 @@
-#!/bin/sh
-# Simple S6 logger for Privoxy: pipe service stdout/stderr to this script's stdout
-# This output will then be captured by Docker logs.
-exec cat
+#!/command/execlineb -P
+# Standard S6 logging script for the Privoxy service.
+
+# This captures privoxy's stdout/stderr and logs it with timestamps.
+# -b: blocking pipe
+# n20: rotate up to 20 log files
+# s1000000: max log file size of 1MB
+# T: add ISO8601 timestamps to each line
+s6-log -b n20 s1000000 T /var/log/privoxy

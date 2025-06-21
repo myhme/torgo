@@ -9,27 +9,52 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-s -w" -o torgo-app ./cmd/tor
 
 # Stage 2: Create the final production image
 FROM alpine:latest
-WORKDIR /app
 
-# Install runtime dependencies: Tor, Privoxy, S6 Overlay, and iptables
+# --- S6-Overlay Installation ---
+# Set S6-Overlay version
+ENV S6_OVERLAY_VERSION=v3.2.1.0
+
+# Install runtime dependencies, including curl for downloading S6
 RUN apk add --no-cache \
     tor \
     privoxy \
-    s6-overlay \
-    iptables
+    iptables \
+    xz \
+    bash \
+    curl
 
-# Copy the built Go application from the builder stage
+# Use Docker's automatic build-time argument `TARGETARCH` to determine architecture
+ARG TARGETARCH
+
+# Download and install S6-Overlay for the correct target architecture
+RUN case ${TARGETARCH} in \
+        amd64) S6_ARCH="x86_64" ;; \
+        arm64) S6_ARCH="aarch64" ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    echo "Downloading S6-Overlay for architecture: ${TARGETARCH} -> ${S6_ARCH}" && \
+    curl -L -s https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz -o /tmp/s6-overlay-noarch.tar.xz && \
+    curl -L -s https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-${S6_ARCH}.tar.xz -o /tmp/s6-overlay.tar.xz && \
+    tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz && \
+    tar -C / -Jxpf /tmp/s6-overlay.tar.xz && \
+    rm -rf /tmp/*
+
+
+# --- torgo Application Setup ---
+WORKDIR /app
 COPY --from=builder /app/torgo-app .
-
-# Copy configuration templates and scripts
 COPY torrc.template /etc/tor/
 COPY privoxy.conf.template /etc/privoxy/
-COPY entrypoint.sh /app/
 COPY docker-healthcheck.sh /app/
+RUN chmod +x /app/docker-healthcheck.sh
 
-# Make scripts executable
-RUN chmod +x /app/entrypoint.sh /app/docker-healthcheck.sh
 
-# Entrypoint to run the S6 Overlay system
-ENTRYPOINT ["/bin/s6-entrypoint"]
-CMD ["/app/entrypoint.sh"]
+# --- S6-Overlay Service Configuration ---
+# Copy the entire rootfs structure, which contains all service definitions,
+# into the root of the image.
+COPY rootfs/ /
+
+
+# The official S6-Overlay entrypoint is /init. It will run all setup scripts
+# and then start and supervise all defined services.
+ENTRYPOINT ["/init"]

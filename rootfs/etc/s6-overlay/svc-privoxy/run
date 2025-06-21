@@ -1,9 +1,7 @@
-#!/command/execlineb -P
-# S6 run script for Privoxy
+#!/command/with-contenv bash
+# S6 run script for the Privoxy service
 
-foreground { echo "--- S6: Starting Privoxy ---" }
-
-# Privoxy will run as root unless its config or this script changes the user.
-# It reads /etc/privoxy/config which points to torgo's SOCKS port.
-# --no-daemon is crucial for S6 supervision.
+echo "--- S6 Service: Starting Privoxy ---"
+# Use exec to replace the shell process with the privoxy process.
+# S6 will directly manage the privoxy process and restart it if it fails.
 exec privoxy --no-daemon /etc/privoxy/config
