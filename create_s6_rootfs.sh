@@ -5,7 +5,7 @@
 # This script automatically generates the entire S6 overlay directory structure
 # for the torgo project, including all necessary service files and permissions.
 # It is designed to be robust and avoid race conditions during container startup.
-# This version includes the final corrected Privoxy configuration.
+# This version includes the final, minimal, and corrected Privoxy configuration.
 
 set -e
 
@@ -15,7 +15,7 @@ BASE_DIR="${ROOTFS_DIR}/etc/s6-overlay"
 
 # --- Main Script ---
 
-echo "--- Generating Final S6 Overlay rootfs for torgo (v3) ---"
+echo "--- Generating Final S6 Overlay rootfs for torgo (v4) ---"
 
 # Clean up any previous structure
 if [ -d "$ROOTFS_DIR" ]; then
@@ -148,22 +148,15 @@ echo "--- S6 Service: Starting Privoxy ---"
 # Configure Privoxy just before starting it
 PRIVOXY_CONFIG_FILE="/etc/privoxy/config"
 
-# --- CORRECTED & MINIMAL Privoxy Configuration ---
-# This configuration is compatible with the version of Privoxy from the
-# Alpine package repository. It removes the problematic action files.
+# --- FINAL, MINIMAL Privoxy Configuration ---
+# This configuration is compatible with the Alpine version of Privoxy and
+# removes all non-essential file dependencies to prevent crashes.
 cat > ${PRIVOXY_CONFIG_FILE} <<EOP
-# --- Core Settings ---
-listen-address  [::]:8118
-listen-address  0.0.0.0:8118
-confdir /etc/privoxy
-logdir /var/log/privoxy
-
-# --- Forwarding ---
+# Minimal Privoxy Configuration for torgo
+listen-address  0.0.0.0:${PRIVOXY_HTTP_PORT:-8118}
 forward-socks5t / torgo:9000 .
-
-# --- Logging ---
-# Log level is set by environment variable. 0 is quiet.
-debug ${PRIVOXY_LOG_LEVEL:-0}
+# All logging is handled by S6 stdout/stderr redirection.
+# No other files (actions, logs, etc.) are needed.
 EOP
 
 # Use exec to hand control over to privoxy
@@ -188,8 +181,6 @@ echo "--- S6 Service: Waiting for Tor daemons to be ready... ---"
 
 # This is a crucial step: wait for the Tor daemons to create their cookie files
 # before starting the Go app that needs to connect to them.
-# The `tor-daemons` service must finish its startup sequence first.
-# We'll poll for the last instance's cookie file.
 TOR_INSTANCES=${TOR_INSTANCES:-1}
 LAST_COOKIE_FILE="/var/lib/tor/instance${TOR_INSTANCES}/control_auth_cookie"
 WAIT_SECONDS=60
@@ -225,7 +216,7 @@ touch "${BASE_DIR}/s6-rc.d/user/contents.d/torgo-app"
 # --- Set Permissions ---
 echo "Setting executable permissions..."
 find "${BASE_DIR}" -type f -name "run" -exec chmod +x {} +
-chmod +x "${BASE_DIR}/cont-init.d/01-iptables-setup"
+find "${BASE_DIR}/cont-init.d" -type f -exec chmod +x {} +
 
 
 echo ""
