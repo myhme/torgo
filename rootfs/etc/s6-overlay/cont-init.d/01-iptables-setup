@@ -1,0 +1,17 @@
+#!/command/with-contenv bash
+set -e
+# This script only runs if the transparent proxy mode is enabled.
+if [ "${TORGO_TRANSPARENT_PROXY}" != "true" ]; then
+    exit 0
+fi
+
+echo "--- S6 Init: Enabling Transparent Proxy Mode ---"
+iptables -t nat -F
+iptables -t nat -N TOR_REDIR
+DNSPort=${COMMON_DNS_PROXY_PORT:-5300}
+iptables -t nat -A TOR_REDIR -p udp --dport 53 -j REDIRECT --to-ports "${DNSPort}"
+iptables -t nat -A TOR_REDIR -p tcp --dport 53 -j REDIRECT --to-ports "${DNSPort}"
+HTTPPort=${PRIVOXY_HTTP_PORT:-8118}
+iptables -t nat -A TOR_REDIR -p tcp --syn -j REDIRECT --to-ports "${HTTPPort}"
+iptables -t nat -A PREROUTING -j TOR_REDIR
+echo "S6 Init: iptables rules configured for transparent redirection."

@@ -1,0 +1,19 @@
+#!/command/with-contenv bash
+set -e
+echo "--- S6 Service: Starting Privoxy ---"
+# Configure Privoxy just before starting it
+PRIVOXY_CONFIG_FILE="/etc/privoxy/config"
+
+# --- FINAL, MINIMAL Privoxy Configuration ---
+# This configuration is compatible with the Alpine version of Privoxy and
+# removes all non-essential file dependencies to prevent crashes.
+cat > ${PRIVOXY_CONFIG_FILE} <<EOP
+# Minimal Privoxy Configuration for torgo
+listen-address  0.0.0.0:${PRIVOXY_HTTP_PORT:-8118}
+forward-socks5t / torgo:9000 .
+# All logging is handled by S6 stdout/stderr redirection.
+# No other files (actions, logs, etc.) are needed.
+EOP
+
+# Use exec to hand control over to privoxy
+exec privoxy --no-daemon "${PRIVOXY_CONFIG_FILE}"
