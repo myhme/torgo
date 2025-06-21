@@ -5,7 +5,7 @@
 # This script automatically generates the entire S6 overlay directory structure
 # for the torgo project, including all necessary service files and permissions.
 # It is designed to be robust and avoid race conditions during container startup.
-# This version includes a corrected Privoxy configuration.
+# This version includes the final corrected Privoxy configuration.
 
 set -e
 
@@ -15,7 +15,7 @@ BASE_DIR="${ROOTFS_DIR}/etc/s6-overlay"
 
 # --- Main Script ---
 
-echo "--- Generating Final S6 Overlay rootfs for torgo (v2) ---"
+echo "--- Generating Final S6 Overlay rootfs for torgo (v3) ---"
 
 # Clean up any previous structure
 if [ -d "$ROOTFS_DIR" ]; then
@@ -148,9 +148,9 @@ echo "--- S6 Service: Starting Privoxy ---"
 # Configure Privoxy just before starting it
 PRIVOXY_CONFIG_FILE="/etc/privoxy/config"
 
-# --- CORRECTED Privoxy Configuration ---
+# --- CORRECTED & MINIMAL Privoxy Configuration ---
 # This configuration is compatible with the version of Privoxy from the
-# Alpine package repository and specifies the full paths to action files.
+# Alpine package repository. It removes the problematic action files.
 cat > ${PRIVOXY_CONFIG_FILE} <<EOP
 # --- Core Settings ---
 listen-address  [::]:8118
@@ -161,11 +161,8 @@ logdir /var/log/privoxy
 # --- Forwarding ---
 forward-socks5t / torgo:9000 .
 
-# --- Action Files (with full paths) ---
-actionsfile default.action
-actionsfile user.action
-
 # --- Logging ---
+# Log level is set by environment variable. 0 is quiet.
 debug ${PRIVOXY_LOG_LEVEL:-0}
 EOP
 

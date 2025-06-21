@@ -4,9 +4,9 @@ echo "--- S6 Service: Starting Privoxy ---"
 # Configure Privoxy just before starting it
 PRIVOXY_CONFIG_FILE="/etc/privoxy/config"
 
-# --- CORRECTED Privoxy Configuration ---
+# --- CORRECTED & MINIMAL Privoxy Configuration ---
 # This configuration is compatible with the version of Privoxy from the
-# Alpine package repository and specifies the full paths to action files.
+# Alpine package repository. It removes the problematic action files.
 cat > ${PRIVOXY_CONFIG_FILE} <<EOP
 # --- Core Settings ---
 listen-address  [::]:8118
@@ -17,11 +17,8 @@ logdir /var/log/privoxy
 # --- Forwarding ---
 forward-socks5t / torgo:9000 .
 
-# --- Action Files (with full paths) ---
-actionsfile default.action
-actionsfile user.action
-
 # --- Logging ---
+# Log level is set by environment variable. 0 is quiet.
 debug ${PRIVOXY_LOG_LEVEL:-0}
 EOP
 

@@ -9,15 +9,8 @@ logdir /var/log/privoxy
 
 # --- Forwarding ---
 # Forward all SOCKS traffic to the torgo SOCKS5 load balancer.
-# The '.' means this forwarding rule applies to all destinations.
 # The 'torgo' hostname is used because all services run in the same network namespace.
 forward-socks5t / torgo:9000 .
-
-# --- Action Files (with full paths) ---
-# Specifies the full paths to the default action files provided
-# by the privoxy package, which is required by newer versions.
-actionsfile default.action
-actionsfile user.action
 
 # --- Logging ---
 # The log level is dynamically set by the PRIVOXY_LOG_LEVEL
