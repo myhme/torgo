@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -276,15 +275,22 @@ func (ti *Instance) initializeHTTPClientUnlocked() {
 		return
 	}
 
-	ti.httpClient = &http.Client{
-		Transport: &http.Transport{
-			DialContext:           dialer.DialContext,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
+	// CORRECTED: The proxy.Dialer interface has a Dial method. We must wrap it in a
+	// function that matches the http.Transport.DialContext signature.
+	httpTransport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.Dial(network, addr)
 		},
-		Timeout: ti.appConfig.SocksTimeout * 3,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+
+	ti.httpClient = &http.Client{
+		Transport: httpTransport,
+		Timeout:   ti.appConfig.SocksTimeout * 3,
 	}
 }
 
