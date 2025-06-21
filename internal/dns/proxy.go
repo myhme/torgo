@@ -3,7 +3,6 @@ package dns
 import (
 	"context"
 	"log"
-	"net"
 	"strings"
 
 	"github.com/miekg/dns"

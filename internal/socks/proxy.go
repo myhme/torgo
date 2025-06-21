@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
 	"golang.org/x/net/proxy"
