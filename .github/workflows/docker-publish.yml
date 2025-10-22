@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # QEMU is used by buildx to emulate ARM on x86 runners
       - name: Set up QEMU
