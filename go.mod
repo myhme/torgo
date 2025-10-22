@@ -1,8 +1,8 @@
 module torgo
 
-go 1.24.0
+go 1.25.0
 
-toolchain go1.24.5
+toolchain go1.25.3
 
 require (
 	github.com/miekg/dns v1.1.68
