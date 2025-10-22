@@ -1,0 +1,38 @@
+# VCS
+.git
+.gitignore
+.github
+
+# Secrets
+.env
+*.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.keystore
+*.jks
+*.secret
+secrets/
+.secrets/
+
+# Development and build outputs
+.vscode/
+.idea/
+.fleet/
+bin/
+dist/
+build/
+coverage.out
+coverage/
+*.out
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Caches and temp
+.cache/
+/tmp/
+**/.cache/

@@ -2,3 +2,47 @@ data-dir*/
 test*/
 *.log
 recreate.sh
+
+# Secrets and credentials
+.env
+*.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.keystore
+*.jks
+*.secret
+secrets/
+.secrets/
+
+# IDE/editor
+.vscode/
+.idea/
+.fleet/
+
+# Build artifacts
+bin/
+dist/
+build/
+coverage.out
+coverage/
+*.out
+
+# Logs and databases
+*.log
+*.sqlite*
+*.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Go workspace
+go.work
+
+# Caches and temp
+.cache/
+tmp/
+**/.cache/

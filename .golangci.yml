@@ -1,0 +1,33 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - gosec
+    - errcheck
+    - gosimple
+    - ineffassign
+    - unused
+    - misspell
+    - bodyclose
+    - unparam
+    - prealloc
+    - goconst
+    - revive
+    - goimports
+
+linters-settings:
+  misspell:
+    locale: US
+  revive:
+    severity: warning
+  gosec:
+    excludes:
+      - G115 # Potential integer overflow false positives on conversions
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
