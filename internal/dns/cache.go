@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"math"
 
 	"github.com/miekg/dns"
 	"torgo/internal/config"
@@ -136,7 +137,13 @@ func (dc *DNSCache) Set(question dns.Question, msg *dns.Msg) {
 		effectiveTTL = uint32(dc.appConfig.DNSCacheMinTTLOverrideSeconds)
 	}
 	if dc.appConfig.DNSCacheMaxTTLOverrideSeconds > 0 && effectiveTTL > uint32(dc.appConfig.DNSCacheMaxTTLOverrideSeconds) {
-		effectiveTTL = uint32(dc.appConfig.DNSCacheMaxTTLOverrideSeconds)
+		// Ensure that the override is within [1, math.MaxUint32] before casting to uint32
+		if dc.appConfig.DNSCacheMaxTTLOverrideSeconds <= int(math.MaxUint32) {
+			effectiveTTL = uint32(dc.appConfig.DNSCacheMaxTTLOverrideSeconds)
+		} else {
+			// Optionally warn, and do not override if out-of-bounds (fallback)
+			log.Printf("DNSCacheMaxTTLOverrideSeconds value (%d) is out of uint32 bounds. Ignoring override.", dc.appConfig.DNSCacheMaxTTLOverrideSeconds)
+		}
 	}
 
 	if effectiveTTL == 0 {
