@@ -3,9 +3,31 @@
 listen-address  [::]:8118
 listen-address  0.0.0.0:8118
 
+# Restrict who can connect (permit list). Default: only localhost.
+permit-access 127.0.0.1
+permit-access [::1]
+# Uncomment to allow Docker/private subnets if needed:
+# permit-access 172.16.0.0/12
+# permit-access 10.0.0.0/8
+# permit-access 192.168.0.0/16
+
 # Define the configuration and log directories
 confdir /etc/privoxy
 logdir /var/log/privoxy
+# Log to stdout in containers to avoid writing sensitive data to disk
+logfile /dev/stdout
+
+# Hardened defaults
+accept-intercepted-requests 0
+enable-remote-toggle 0
+enable-edit-actions 0
+enable-remote-http-toggle 0
+enable-proxy-authentication-forwarding 0
+enforce-blocks 1
+keep-alive-timeout 5
+socket-timeout 30
+# Do not add X-Forwarded-For
+add-forwarded-for-header 0
 
 # --- Forwarding ---
 # Forward all SOCKS traffic to the torgo SOCKS5 load balancer.
