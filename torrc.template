@@ -1,9 +1,9 @@
 # Tor Configuration Template for torgo instances
 
 # --- Core Networking ---
-SocksPort __SOCKSPORT__
-ControlPort __CONTROLPORT__
-DNSPort __DNSPORT__
+SocksPort 127.0.0.1:__SOCKSPORT__
+ControlPort 127.0.0.1:__CONTROLPORT__
+DNSPort 127.0.0.1:__DNSPORT__
 
 # --- Paths ---
 DataDirectory __DATADIR__
@@ -13,6 +13,22 @@ PidFile __PIDFILE__
 ClientOnly 1
 
 SafeLogging 1 # Scrubs IPs from logs
+
+# --- Access Policies ---
+# Allow local applications and 10.10.1.x network clients only.
+SocksPolicy accept 127.0.0.1
+#SocksPolicy accept 10.10.1.0/24
+SocksPolicy reject *
+
+# --- Front-end Access Guidance ---
+# Recommended: keep backend Tor listeners (SocksPort, DNSPort, ControlPort) bound to 127.0.0.1.
+# Expose only torgo's unified front-end SOCKS/DNS to the network.
+# If you must expose a Tor SOCKS for clients on 10.10.1.x, add via __EXTRA_TOR_OPTIONS__:
+#   SocksPort <wg_interface_ip>:9150
+# Existing SocksPolicy rules (127.0.0.1 and 10.10.1.0/24) will restrict access.
+# Do NOT expose ControlPort; optionally use a UNIX control socket instead:
+#   ControlSocket /run/torgo/tor-__INSTANCE__.sock GroupWritable
+#   CookieAuthFileGroupReadable 1
 
 # --- Security & Control ---
 # Enable control port and cookie authentication
