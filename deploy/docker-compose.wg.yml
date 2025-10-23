@@ -1,0 +1,122 @@
+version: "3.8"
+
+services:
+  wireguard_essential:
+    image: ghcr.io/wg-easy/wg-easy:15
+    container_name: wireguard_essential
+    restart: always
+    env_file: /mnt/data/docker/docker-scripts/.env
+    profiles: ["essential", "vpn-server", "mediaserver"]
+    labels:
+      - "com.priority=2"
+      - "homepage.group=Infrastructure"
+      - "homepage.name=WireGuard Easy"
+      - "homepage.icon=wireguard.png"
+      - "homepage.href=http://10.10.1.2:51821"
+      - "homepage.description=VPN Server Control Panel"
+    depends_on:
+      adguardhome_essential:
+        condition: service_started
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    ports:
+      - "51820:51820/udp"
+      - "51821:51821/tcp"
+    volumes:
+      - /lib/modules:/lib/modules:ro
+      - /mnt/data/docker/docker-config/wireguard/wgeasy/etc/wireguard:/etc/wireguard
+      - /mnt/data/docker/docker-config/wireguard/wgeasy/etc/wireguard/confs:/etc/wireguard
+      - /mnt/data/docker/docker-config/wireguard/wgeasy/etc/wireguard/scripts:/etc/scripts:ro
+    environment:
+      - INSECURE=true
+      - HOST=0.0.0.0
+      - PORT=51821
+      - DISABLE_IPV6=true
+      - PROMETHEUS_ENABLED=false
+      - PROMETHEUS_PASSWORD_FILE=/run/secrets/wg_prometheus_password
+    secrets:
+      - wg_init_username
+      - wg_init_password
+      - wg_init_host
+      - wg_prometheus_password
+    networks:
+      public:
+        ipv4_address: 10.10.1.2
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  proxy:
+    image: ghcr.io/myhme/torgo:main
+    container_name: proxy
+    restart: always
+    profiles: ["vpn-proxy", "mediaserver"]
+    labels:
+      - "com.priority=15"
+      - "homepage.group=Proxies & Tunnels"
+      - "homepage.name=TorGo Proxy"
+      - "homepage.icon=tor.png"
+      - "homepage.description=Tor Proxy Manager"
+    depends_on:
+      adguardhome_essential:
+        condition: service_healthy
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+      - net.ipv6.conf.lo.disable_ipv6=1
+    environment:
+      - TOR_INSTANCES=3
+      - API_PORT=8080
+      - COMMON_SOCKS_PROXY_PORT=9150
+      - COMMON_DNS_PROXY_PORT=53
+      - PRIVOXY_HTTP_PORT=8118
+      # Bind API only to localhost inside the container (not published)
+      - API_BIND_ADDR=127.0.0.1
+      # Bind SOCKS listener to all container interfaces; host port publish restricts to WG IP
+      - TORGO_SOCKS_BIND_ADDR=0.0.0.0
+      # Allow only WireGuard clients (10.10.1.0/24) to connect to SOCKS
+      - TORGO_LAN_CIDR=10.10.1.0/24
+      # Block proxying to private/reserved destinations by default
+      - TORGO_ALLOW_PRIVATE_DEST=0
+    # Publish SOCKS only on the host's WireGuard interface IP. Replace 10.10.1.1 with your host WG IP.
+    ports:
+      - "10.10.1.1:9150:9150/tcp"
+    networks:
+      public:
+        ipv4_address: 10.10.1.50
+    healthcheck:
+      test: ["CMD", "/app/docker-healthcheck.sh"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  public:
+    external: true
+    # Or define IPAM if you don't already have an external network:
+    # ipam:
+    #   driver: default
+    #   config:
+    #     - subnet: 10.10.1.0/24
+    #       gateway: 10.10.1.1
+
+secrets:
+  wg_init_username:
+    external: true
+  wg_init_password:
+    external: true
+  wg_init_host:
+    external: true
+  wg_prometheus_password:
+    external: true

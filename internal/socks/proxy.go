@@ -9,11 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/proxy"
 	"torgo/internal/config"
 	"torgo/internal/lb"
 	"torgo/internal/tor"
-
-	"golang.org/x/net/proxy"
 )
 
 // helper: parse a comma-separated list of CIDRs
@@ -77,17 +76,46 @@ func isPrivateOrLocalIP(ip net.IP) bool {
 	return false
 }
 
+// validate domain according to basic RFC rules (ASCII, label length, allowed chars, TLD not all-numeric)
+func isValidHostname(h string) bool {
+	if h == "" {
+		return false
+	}
+	if strings.HasSuffix(h, ".") {
+		h = strings.TrimSuffix(h, ".")
+	}
+	if len(h) == 0 || len(h) > 253 {
+		return false
+	}
+	h = strings.ToLower(h)
+	labels := strings.Split(h, ".")
+	for i, lab := range labels {
+		if len(lab) == 0 || len(lab) > 63 {
+			return false
+		}
+		if lab[0] == '-' || lab[len(lab)-1] == '-' {
+			return false
+		}
+		alphaInTLD := false
+		for j := 0; j < len(lab); j++ {
+			c := lab[j]
+			if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+				if i == len(labels)-1 && (c >= 'a' && c <= 'z') {
+					alphaInTLD = true
+				}
+				continue
+			}
+			return false
+		}
+		if i == len(labels)-1 && !alphaInTLD {
+			return false
+		}
+	}
+	return true
+}
+
 func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCfg *config.AppConfig, allowPrivateDest bool) {
 	defer clientConn.Close()
-
-	backendInstance, err := lb.GetNextHealthyInstance(instances)
-	if err != nil {
-		log.Printf("SOCKS: No healthy backend Tor available: %v", err)
-		return
-	}
-
-	backendInstance.IncrementActiveConnections()
-	defer backendInstance.DecrementActiveConnections()
 
 	if err := clientConn.SetReadDeadline(time.Now().Add(appCfg.SocksTimeout)); err != nil {
 		return
@@ -158,7 +186,12 @@ func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCf
 		if domainLen == 0 || n < addrCursor+domainLen+2 {
 			return
 		}
-		targetHost = string(buf[addrCursor : addrCursor+domainLen])
+		domain := string(buf[addrCursor : addrCursor+domainLen])
+		if !isValidHostname(domain) {
+			clientConn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			return
+		}
+		targetHost = domain
 		addrCursor += domainLen
 	case 4: // IPv6
 		if n < addrCursor+net.IPv6len+2 {
@@ -181,6 +214,25 @@ func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCf
 
 	clientConn.SetReadDeadline(time.Time{})
 
+	// Select a healthy backend with brief retries to allow Tor to finish bootstrapping
+	var backendInstance *tor.Instance
+	for i := 0; i < 5; i++ {
+		bi, err := lb.GetNextHealthyInstance(instances)
+		if err == nil {
+			backendInstance = bi
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if backendInstance == nil {
+		// No healthy backend available after retries; fail quietly to avoid log spam
+		clientConn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+
+	backendInstance.IncrementActiveConnections()
+	defer backendInstance.DecrementActiveConnections()
+
 	dialer, err := proxy.SOCKS5("tcp", backendInstance.GetBackendSocksHost(), nil, &net.Dialer{
 		Timeout: appCfg.SocksTimeout,
 	})
@@ -190,84 +242,3 @@ func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCf
 	}
 
 	targetTCPConn, err := dialer.Dial("tcp", targetAddress)
-	if err != nil {
-		replyCode := byte(0x01)
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			replyCode = 0x06
-		}
-		clientConn.Write([]byte{0x05, replyCode, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return
-	}
-	defer targetTCPConn.Close()
-
-	if _, err := clientConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
-		return
-	}
-
-	// Best-effort keepalive on TCP connections
-	if tc, ok := clientConn.(*net.TCPConn); ok {
-		_ = tc.SetKeepAlive(true)
-		_ = tc.SetKeepAlivePeriod(2 * time.Minute)
-	}
-	if tc, ok := targetTCPConn.(*net.TCPConn); ok {
-		_ = tc.SetKeepAlive(true)
-		_ = tc.SetKeepAlivePeriod(2 * time.Minute)
-	}
-
-	errChan := make(chan error, 2)
-	go func() { _, err := io.Copy(targetTCPConn, clientConn); errChan <- err }()
-	go func() { _, err := io.Copy(clientConn, targetTCPConn); errChan <- err }()
-	<-errChan
-	<-errChan
-}
-
-func StartSocksProxyServer(ctx context.Context, instances []*tor.Instance, appCfg *config.AppConfig) {
-	bindIP := strings.TrimSpace(appCfg.SocksBindAddr)
-	if bindIP == "" {
-		bindIP = "0.0.0.0"
-	}
-	listenAddr := net.JoinHostPort(bindIP, appCfg.CommonSocksPort)
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		log.Fatalf("SOCKS: Failed to start SOCKS5 proxy server on %s: %v", listenAddr, err)
-	}
-	log.Printf("SOCKS5 proxy server listening on %s", listenAddr)
-
-	allowedClientNets := buildAllowedClientNets(appCfg.LANClientCIDRs)
-	allowPrivateDest := appCfg.AllowPrivateDest
-
-	go func() {
-		<-ctx.Done()
-		log.Println("SOCKS Proxy: Shutting down SOCKS listener...")
-		listener.Close()
-	}()
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				log.Println("SOCKS Proxy: Listener closed as part of shutdown.")
-				return
-			default:
-				log.Printf("SOCKS: Failed to accept connection: %v", err)
-				continue
-			}
-		}
-
-		// Access control: allow only loopback and configured LAN CIDRs
-		remoteHost, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-		if ip := net.ParseIP(remoteHost); ip != nil && !ipInNets(ip, allowedClientNets) {
-			_ = conn.Close()
-			continue
-		}
-
-		// Enable keepalive on accepted client connection
-		if tc, ok := conn.(*net.TCPConn); ok {
-			_ = tc.SetKeepAlive(true)
-			_ = tc.SetKeepAlivePeriod(2 * time.Minute)
-		}
-
-		go handleSocksConnection(conn, instances, appCfg, allowPrivateDest)
-	}
-}
