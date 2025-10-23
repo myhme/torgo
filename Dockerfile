@@ -23,6 +23,10 @@ RUN apk add --no-cache \
     bash \
     curl
 
+# Ensure runtime user/group exist at build-time (read-only rootfs at runtime)
+RUN addgroup -S _tor 2>/dev/null || true && \
+    adduser -S -G _tor -h /var/lib/tor -s /sbin/nologin _tor 2>/dev/null || true
+
 # Use Docker's automatic build-time argument `TARGETARCH`
 ARG TARGETARCH
 

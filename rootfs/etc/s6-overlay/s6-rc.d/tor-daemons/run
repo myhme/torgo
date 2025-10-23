@@ -13,14 +13,17 @@ TOR_RUN_DIR="/var/run/tor"
 TORRC_TEMPLATE_PATH="/etc/tor/torrc.template"
 TORRC_DIR="/run/tor"
 
+# Ensure required runtime user exists (cannot be created on read-only rootfs)
+if ! getent passwd "${TOR_USER}" >/dev/null 2>&1; then
+  echo "FATAL: Required user '${TOR_USER}' not found. Rebuild the image to include it."
+  exit 1
+fi
+
 # --- Tor Instance Setup ---
 if ! [[ "$TOR_INSTANCES" =~ ^[0-9]+$ ]] || [ "$TOR_INSTANCES" -lt 1 ]; then
     TOR_INSTANCES=1
 fi
 echo "Tor Daemons Service: Preparing to start $TOR_INSTANCES Tor instance(s)..."
-
-if ! getent group _tor > /dev/null; then addgroup -S _tor; fi
-if ! getent passwd _tor > /dev/null; then adduser -S -G _tor -h /var/lib/tor -s /sbin/nologin _tor; fi
 
 mkdir -p "$TOR_RUN_DIR" "$TOR_DATA_BASE_DIR" "$TORRC_DIR"
 chown -R "${TOR_USER}:${TOR_USER}" "$TOR_RUN_DIR" "$TOR_DATA_BASE_DIR"

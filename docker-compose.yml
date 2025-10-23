@@ -21,7 +21,7 @@ services:
       core: 0
     tmpfs:
       - /var/lib/tor:rw,noexec,nosuid,nodev,size=512m,mode=0700
-      - /run:rw,nosuid,nodev,size=64m,mode=0755
+      - /run:rw,exec,nosuid,nodev,size=64m,mode=0755
       - /var/log:rw,nosuid,nodev,size=64m,mode=0755
       - /tmp:rw,nosuid,nodev,size=128m,mode=1777
     ports:
