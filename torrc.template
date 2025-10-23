@@ -1,9 +1,11 @@
 # Tor Configuration Template for torgo instances
 
 # --- Core Networking ---
-SocksPort 127.0.0.1:__SOCKSPORT__
-ControlPort 127.0.0.1:__CONTROLPORT__
-DNSPort 127.0.0.1:__DNSPORT__
+# Placeholders may be either "<port>" or "<ip>:<port>". For backend instances, use
+# 127.0.0.1:<port> to keep them local-only.
+SocksPort __SOCKSPORT__
+ControlPort __CONTROLPORT__
+DNSPort __DNSPORT__
 
 # --- Paths ---
 DataDirectory __DATADIR__
