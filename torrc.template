@@ -15,17 +15,19 @@ ClientOnly 1
 SafeLogging 1 # Scrubs IPs from logs
 
 # --- Access Policies ---
-# Allow local applications and 10.10.1.x network clients only.
+# Allow local applications and LAN clients only.
+# Set __LAN_CIDR__ to a CIDR (e.g., 10.10.1.0/24) via environment/template substitution.
 SocksPolicy accept 127.0.0.1
-#SocksPolicy accept 10.10.1.0/24
+SocksPolicy accept __LAN_CIDR__
 SocksPolicy reject *
 
 # --- Front-end Access Guidance ---
 # Recommended: keep backend Tor listeners (SocksPort, DNSPort, ControlPort) bound to 127.0.0.1.
 # Expose only torgo's unified front-end SOCKS/DNS to the network.
-# If you must expose a Tor SOCKS for clients on 10.10.1.x, add via __EXTRA_TOR_OPTIONS__:
-#   SocksPort <wg_interface_ip>:9150
-# Existing SocksPolicy rules (127.0.0.1 and 10.10.1.0/24) will restrict access.
+# If you must expose a Tor SOCKS for clients on __LAN_CIDR__, add via __EXTRA_TOR_OPTIONS__:
+#   SocksPort __LAN_BIND_IP__:9150
+#   # where __LAN_BIND_IP__ is your WG interface IP (e.g., 10.10.1.x)
+# Existing SocksPolicy rules (127.0.0.1 and __LAN_CIDR__) will restrict access.
 # Do NOT expose ControlPort; optionally use a UNIX control socket instead:
 #   ControlSocket /run/torgo/tor-__INSTANCE__.sock GroupWritable
 #   CookieAuthFileGroupReadable 1
