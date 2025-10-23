@@ -1,58 +1,83 @@
 package dns
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"errors"
 	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
-	"math"
+
+	"torgo/internal/config"
 
 	"github.com/miekg/dns"
-	"torgo/internal/config"
 )
 
-// cacheEntry holds a DNS message and its expiry time.
+// cacheEntry holds encrypted DNS message bytes and its expiry time.
 type cacheEntry struct {
-	msg        *dns.Msg
+	ciphertext []byte
+	nonce      []byte
 	expiryTime time.Time
 }
 
-// DNSCache is a thread-safe in-memory DNS cache.
+// DNSCache is a thread-safe in-memory DNS cache (encrypted at rest in RAM).
 type DNSCache struct {
 	mu        sync.RWMutex
 	cache     map[string]*cacheEntry
 	appConfig *config.AppConfig
 	stopChan  chan struct{}
+
+	// encryption state
+	aead cipher.AEAD
+	key  []byte
 }
 
 var globalDNSCacheInstance *DNSCache
 
-// NewDNSCache initializes a new DNS cache.
+// NewDNSCache initializes a new encrypted DNS cache.
 func NewDNSCache(appCfg *config.AppConfig) *DNSCache {
 	if !appCfg.DNSCacheEnabled {
 		return nil
 	}
+	// Generate per-process random key (AES-256-GCM)
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		log.Printf("DNS Cache: Failed to initialize encryption key: %v. Disabling cache.", err)
+		return nil
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		log.Printf("DNS Cache: Failed to create cipher: %v. Disabling cache.", err)
+		return nil
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		log.Printf("DNS Cache: Failed to create AEAD: %v. Disabling cache.", err)
+		return nil
+	}
+
 	dc := &DNSCache{
 		cache:     make(map[string]*cacheEntry),
 		appConfig: appCfg,
 		stopChan:  make(chan struct{}),
+		aead:      aead,
+		key:       key,
 	}
 	if appCfg.DNSCacheEvictionInterval > 0 {
 		go dc.startEvictionManager(appCfg.DNSCacheEvictionInterval)
 	}
-	log.Println("DNS Cache initialized.")
+	log.Println("DNS Cache initialized (encrypted in memory).")
 	return dc
 }
 
 // SetGlobalDNSCache sets the global DNS cache instance.
-func SetGlobalDNSCache(cache *DNSCache) {
-	globalDNSCacheInstance = cache
-}
+func SetGlobalDNSCache(cache *DNSCache) { globalDNSCacheInstance = cache }
 
 // GetGlobalDNSCache returns the global DNS cache instance.
-func GetGlobalDNSCache() *DNSCache {
-	return globalDNSCacheInstance
-}
+func GetGlobalDNSCache() *DNSCache { return globalDNSCacheInstance }
 
 // startEvictionManager periodically removes expired entries from the cache.
 func (dc *DNSCache) startEvictionManager(interval time.Duration) {
@@ -70,14 +95,15 @@ func (dc *DNSCache) startEvictionManager(interval time.Duration) {
 	}
 }
 
-// evictExpired removes entries that have passed their expiry time.
+// evictExpired removes entries that have passed their expiry time and zeroizes data.
 func (dc *DNSCache) evictExpired() {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
-
 	now := time.Now()
 	for key, entry := range dc.cache {
 		if now.After(entry.expiryTime) {
+			zeroize(entry.ciphertext)
+			zeroize(entry.nonce)
 			delete(dc.cache, key)
 		}
 	}
@@ -88,47 +114,48 @@ func getCacheKey(q dns.Question) string {
 	return strings.ToLower(q.Name) + "_" + dns.TypeToString[q.Qtype]
 }
 
-// Get retrieves a DNS message from the cache if it's valid and not expired.
+// Get retrieves and decrypts a DNS message from the cache if valid and not expired.
 func (dc *DNSCache) Get(question dns.Question) (*dns.Msg, bool) {
-	if dc == nil {
+	if dc == nil || dc.aead == nil {
 		return nil, false
 	}
-
 	key := getCacheKey(question)
 	dc.mu.RLock()
 	entry, found := dc.cache[key]
 	dc.mu.RUnlock()
-
 	if !found || time.Now().After(entry.expiryTime) {
 		return nil, false
 	}
-
-	msgCopy := entry.msg.Copy()
+	plain, err := dc.decrypt(entry.nonce, entry.ciphertext)
+	if err != nil {
+		return nil, false
+	}
+	var msg dns.Msg
+	if err := msg.Unpack(plain); err != nil {
+		return nil, false
+	}
+	// Adjust TTLs to remaining lifetime
 	remainingTTL := uint32(time.Until(entry.expiryTime).Seconds())
-
-	for _, rr := range msgCopy.Answer {
+	for _, rr := range msg.Answer {
 		if rr.Header().Ttl > remainingTTL {
 			rr.Header().Ttl = remainingTTL
 		}
 	}
-	for _, rr := range msgCopy.Ns {
+	for _, rr := range msg.Ns {
 		if rr.Header().Ttl > remainingTTL {
 			rr.Header().Ttl = remainingTTL
 		}
 	}
-
-	return msgCopy, true
+	return &msg, true
 }
 
-// Set adds a DNS message to the cache.
+// Set adds and encrypts a DNS message in the cache.
 func (dc *DNSCache) Set(question dns.Question, msg *dns.Msg) {
-	if dc == nil || msg.Rcode != dns.RcodeSuccess {
+	if dc == nil || dc.aead == nil || msg.Rcode != dns.RcodeSuccess {
 		return
 	}
-
 	key := getCacheKey(question)
 	minTTL := getMinTTLFromMsg(msg)
-
 	effectiveTTL := minTTL
 	if effectiveTTL == 0 && dc.appConfig.DNSCacheDefaultMinTTLSeconds > 0 {
 		effectiveTTL = uint32(dc.appConfig.DNSCacheDefaultMinTTLSeconds)
@@ -137,33 +164,32 @@ func (dc *DNSCache) Set(question dns.Question, msg *dns.Msg) {
 		effectiveTTL = uint32(dc.appConfig.DNSCacheMinTTLOverrideSeconds)
 	}
 	if dc.appConfig.DNSCacheMaxTTLOverrideSeconds > 0 && effectiveTTL > uint32(dc.appConfig.DNSCacheMaxTTLOverrideSeconds) {
-		// Ensure that the override is within [1, math.MaxUint32] before casting to uint32
 		if dc.appConfig.DNSCacheMaxTTLOverrideSeconds <= int(math.MaxUint32) {
 			effectiveTTL = uint32(dc.appConfig.DNSCacheMaxTTLOverrideSeconds)
 		} else {
-			// Optionally warn, and do not override if out-of-bounds (fallback)
 			log.Printf("DNSCacheMaxTTLOverrideSeconds value (%d) is out of uint32 bounds. Ignoring override.", dc.appConfig.DNSCacheMaxTTLOverrideSeconds)
 		}
 	}
-
 	if effectiveTTL == 0 {
 		return
 	}
-
-	dc.mu.Lock()
-	defer dc.mu.Unlock()
-
-	dc.cache[key] = &cacheEntry{
-		msg:        msg.Copy(),
-		expiryTime: time.Now().Add(time.Duration(effectiveTTL) * time.Second),
+	packed, err := msg.Pack()
+	if err != nil {
+		return
 	}
+	nonce, ciphertext, err := dc.encrypt(packed)
+	if err != nil {
+		return
+	}
+	dc.mu.Lock()
+	dc.cache[key] = &cacheEntry{ciphertext: ciphertext, nonce: nonce, expiryTime: time.Now().Add(time.Duration(effectiveTTL) * time.Second)}
+	dc.mu.Unlock()
 }
 
 // getMinTTLFromMsg finds the minimum TTL in a DNS message.
 func getMinTTLFromMsg(m *dns.Msg) uint32 {
-	var minTTL uint32 = 0
+	var minTTL uint32
 	foundAnyTTL := false
-
 	processSection := func(s []dns.RR) {
 		for _, rr := range s {
 			if rr.Header().Rrtype == dns.TypeOPT {
@@ -181,9 +207,49 @@ func getMinTTLFromMsg(m *dns.Msg) uint32 {
 	return minTTL
 }
 
-// Stop gracefully shuts down the DNS cache eviction manager.
+// Stop gracefully shuts down the DNS cache: zeroize entries and key.
 func (dc *DNSCache) Stop() {
-	if dc != nil && dc.stopChan != nil {
+	if dc == nil {
+		return
+	}
+	if dc.stopChan != nil {
 		close(dc.stopChan)
+	}
+	dc.mu.Lock()
+	for k, entry := range dc.cache {
+		zeroize(entry.ciphertext)
+		zeroize(entry.nonce)
+		delete(dc.cache, k)
+	}
+	dc.cache = make(map[string]*cacheEntry)
+	if dc.key != nil {
+		zeroize(dc.key)
+	}
+	dc.aead = nil
+	dc.mu.Unlock()
+}
+
+func (dc *DNSCache) encrypt(plain []byte) (nonce []byte, ciphertext []byte, err error) {
+	nonce = make([]byte, dc.aead.NonceSize())
+	if _, err = rand.Read(nonce); err != nil {
+		return nil, nil, err
+	}
+	ciphertext = dc.aead.Seal(nil, nonce, plain, nil)
+	return nonce, ciphertext, nil
+}
+
+func (dc *DNSCache) decrypt(nonce, ciphertext []byte) ([]byte, error) {
+	if len(nonce) != dc.aead.NonceSize() {
+		return nil, errors.New("dns cache: invalid nonce size")
+	}
+	return dc.aead.Open(nil, nonce, ciphertext, nil)
+}
+
+func zeroize(b []byte) {
+	if b == nil {
+		return
+	}
+	for i := range b {
+		b[i] = 0
 	}
 }
