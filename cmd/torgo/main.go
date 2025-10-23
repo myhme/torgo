@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -79,16 +80,18 @@ func main() {
 	api.RegisterWebUIHandlers(httpMux)
 	api.RegisterAPIHandlers(httpMux, backendInstances, appCfg)
 
+	apiAddr := net.JoinHostPort(appCfg.APIBindAddr, appCfg.APIPort)
 	apiServer := &http.Server{
-		Addr:         ":" + appCfg.APIPort,
-		Handler:      httpMux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              apiAddr,
+		Handler:           httpMux,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
-		log.Printf("Management API server (and WebUI at /webui) listening on :%s", appCfg.APIPort)
+		log.Printf("Management API server (and WebUI at /webui) listening on %s", apiAddr)
 		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start management API server: %v", err)
 		}

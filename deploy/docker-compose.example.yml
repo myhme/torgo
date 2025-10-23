@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  torgo:
+    image: ghcr.io/myhme/torgo:main
+    container_name: torgo
+    restart: unless-stopped
+    environment:
+      - TORGO_SOCKS_BIND_ADDR=${LAN_BIND_IP:-0.0.0.0}
+      - TORGO_LAN_CIDR=${LAN_CIDR:-10.10.1.0/24}
+      - TORGO_ALLOW_PRIVATE_DEST=${ALLOW_PRIVATE_DEST:-0}
+      # Provide values for torrc.template substitution if used by the app
+      - LAN_BIND_IP=${LAN_BIND_IP:-}
+      - LAN_CIDR=${LAN_CIDR:-}
+    ports:
+      - "${LAN_BIND_IP:-0.0.0.0}:9150:9150/tcp"
+    volumes:
+      - ../torrc.template:/etc/tor/torrc.template:ro
+      - torgo-data:/var/lib/torgo
+    ulimits:
+      nofile: 65536
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "exec 3<>/dev/tcp/127.0.0.1/9150 && printf '\\x05\\x01\\x00' >&3 && sleep 1; exit 0"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # network_mode: "host"  # Uncomment if you need to bind directly to host interfaces
+
+volumes:
+  torgo-data:

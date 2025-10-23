@@ -10,30 +10,30 @@ import (
 )
 
 const (
-	DefaultTorAuthCookiePath             = "/var/lib/tor/control_auth_cookie"
-	DefaultIPCheckURL                    = "https://check.torproject.org/api/ip"
-	DefaultHealthCheckInterval           = 30 * time.Second
-	DefaultSocksTimeout                  = 10 * time.Second
-	DefaultDNSTimeout                    = 5 * time.Second
-	DefaultRotationStaggerDelay          = 10 * time.Second
-	DefaultGracefulRotationTimeout       = 120 * time.Second
-	DefaultAPIPort                       = "8080"
-	DefaultCommonSocksPort               = "9000"
-	DefaultCommonDNSPort                 = "5300"
-	DefaultSocksBasePort                 = 9050
-	DefaultControlBasePort               = 9160
-	DefaultDNSBasePort                   = 9200
-	DefaultNumTorInstances               = 1
-	DefaultIPDiversityCheckInterval      = 5 * time.Minute
-	DefaultIPDiversityRotationCooldown   = 15 * time.Minute
-	DefaultMinInstancesForIPDiversityCheck = 2
+	DefaultTorAuthCookiePath                = "/var/lib/tor/control_auth_cookie"
+	DefaultIPCheckURL                       = "https://check.torproject.org/api/ip"
+	DefaultHealthCheckInterval              = 30 * time.Second
+	DefaultSocksTimeout                     = 10 * time.Second
+	DefaultDNSTimeout                       = 5 * time.Second
+	DefaultRotationStaggerDelay             = 10 * time.Second
+	DefaultGracefulRotationTimeout          = 120 * time.Second
+	DefaultAPIPort                          = "8080"
+	DefaultCommonSocksPort                  = "9000"
+	DefaultCommonDNSPort                    = "5300"
+	DefaultSocksBasePort                    = 9050
+	DefaultControlBasePort                  = 9160
+	DefaultDNSBasePort                      = 9200
+	DefaultNumTorInstances                  = 1
+	DefaultIPDiversityCheckInterval         = 5 * time.Minute
+	DefaultIPDiversityRotationCooldown      = 15 * time.Minute
+	DefaultMinInstancesForIPDiversityCheck  = 2
 	DefaultAutoRotateCircuitIntervalSeconds = 3600
-	DefaultAutoRotateStaggerDelaySeconds = 30
-	DefaultDNSCacheEnabled               = true
-	DefaultDNSCacheEvictionIntervalSeconds = 300
-	DefaultDNSCacheDefaultMinTTLSeconds  = 60
-	DefaultDNSCacheMinTTLOverrideSeconds = 0
-	DefaultDNSCacheMaxTTLOverrideSeconds = 86400
+	DefaultAutoRotateStaggerDelaySeconds    = 30
+	DefaultDNSCacheEnabled                  = true
+	DefaultDNSCacheEvictionIntervalSeconds  = 300
+	DefaultDNSCacheDefaultMinTTLSeconds     = 60
+	DefaultDNSCacheMinTTLOverrideSeconds    = 0
+	DefaultDNSCacheMaxTTLOverrideSeconds    = 86400
 )
 
 type AppConfig struct {
@@ -62,6 +62,13 @@ type AppConfig struct {
 	DNSCacheDefaultMinTTLSeconds    int
 	DNSCacheMinTTLOverrideSeconds   int
 	DNSCacheMaxTTLOverrideSeconds   int
+
+	// Privacy/Security and Binding
+	SocksBindAddr    string
+	DNSBindAddr      string
+	APIBindAddr      string
+	LANClientCIDRs   string // comma-separated
+	AllowPrivateDest bool
 }
 
 var GlobalConfig *AppConfig
@@ -147,6 +154,14 @@ func LoadConfig() *AppConfig {
 		cfg.DNSCacheDefaultMinTTLSeconds = getIntEnv("DNS_CACHE_DEFAULT_MIN_TTL_SECONDS", DefaultDNSCacheDefaultMinTTLSeconds)
 		cfg.DNSCacheMinTTLOverrideSeconds = getIntEnv("DNS_CACHE_MIN_TTL_OVERRIDE_SECONDS", DefaultDNSCacheMinTTLOverrideSeconds)
 		cfg.DNSCacheMaxTTLOverrideSeconds = getIntEnv("DNS_CACHE_MAX_TTL_OVERRIDE_SECONDS", DefaultDNSCacheMaxTTLOverrideSeconds)
+
+		// Privacy/Security bindings
+		cfg.SocksBindAddr = getStringEnv("TORGO_SOCKS_BIND_ADDR", "0.0.0.0")
+		cfg.DNSBindAddr = getStringEnv("TORGO_DNS_BIND_ADDR", "0.0.0.0")
+		cfg.APIBindAddr = getStringEnv("API_BIND_ADDR", "0.0.0.0")
+		cfg.LANClientCIDRs = getStringEnv("TORGO_LAN_CIDR", "")
+		cfg.AllowPrivateDest = getBoolEnv("TORGO_ALLOW_PRIVATE_DEST", false)
+
 		GlobalConfig = cfg
 		log.Printf("Configuration loaded: NumInstances=%d, APIPort=%s", cfg.NumTorInstances, cfg.APIPort)
 	})

@@ -3,13 +3,96 @@ package dns
 import (
 	"context"
 	"log"
+	"net"
 	"strings"
 
-	"github.com/miekg/dns"
 	"torgo/internal/config"
 	"torgo/internal/lb"
 	"torgo/internal/tor"
+
+	"github.com/miekg/dns"
 )
+
+// helpers duplicated locally to avoid cross-package deps
+func parseCIDRs(list string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, s := range strings.Split(list, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(s)
+		if err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}
+
+func buildAllowedClientNets(lanCIDRs string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, cidr := range []string{"127.0.0.0/8", "::1/128"} {
+		_, n, err := net.ParseCIDR(cidr)
+		if err == nil {
+			nets = append(nets, n)
+		}
+	}
+	if strings.TrimSpace(lanCIDRs) != "" {
+		nets = append(nets, parseCIDRs(lanCIDRs)...)
+	}
+	return nets
+}
+
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPrivateOrLocalIP(ip net.IP) bool {
+	cidrs := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"::1/128",
+		"fe80::/10",
+		"fc00::/7",
+	}
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err == nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterPrivateIPsInAnswers(msg *dns.Msg, allowPrivate bool) {
+	if allowPrivate || msg == nil {
+		return
+	}
+	filtered := make([]dns.RR, 0, len(msg.Answer))
+	for _, rr := range msg.Answer {
+		switch a := rr.(type) {
+		case *dns.A:
+			if !isPrivateOrLocalIP(a.A) {
+				filtered = append(filtered, rr)
+			}
+		case *dns.AAAA:
+			if !isPrivateOrLocalIP(a.AAAA) {
+				filtered = append(filtered, rr)
+			}
+		default:
+			filtered = append(filtered, rr)
+		}
+	}
+	msg.Answer = filtered
+}
 
 func handleDNSQuery(w dns.ResponseWriter, r *dns.Msg, instances []*tor.Instance, appCfg *config.AppConfig) {
 	if len(r.Question) == 0 {
@@ -31,7 +114,7 @@ func handleDNSQuery(w dns.ResponseWriter, r *dns.Msg, instances []*tor.Instance,
 
 	backendInstance, err := lb.GetNextHealthyInstance(instances)
 	if err != nil {
-		log.Printf("DNS Proxy: No healthy backend Tor instance for query %s: %v", question.Name, err)
+		log.Printf("DNS Proxy: No healthy backend Tor instance: %v", err)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)
@@ -44,12 +127,14 @@ func handleDNSQuery(w dns.ResponseWriter, r *dns.Msg, instances []*tor.Instance,
 
 	response, _, err := dnsClient.Exchange(r, targetDNSAddr)
 	if err != nil {
-		log.Printf("DNS Proxy: Failed to query Tor DNS %s (instance %d) for %s: %v", targetDNSAddr, backendInstance.InstanceID, question.Name, err)
+		log.Printf("DNS Proxy: Query via %s (inst %d) failed for %s: %v", targetDNSAddr, backendInstance.InstanceID, question.Name, err)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)
 		return
 	}
+
+	filterPrivateIPsInAnswers(response, appCfg.AllowPrivateDest)
 
 	if cache != nil && response.Rcode == dns.RcodeSuccess {
 		cache.Set(question, response)
@@ -59,8 +144,20 @@ func handleDNSQuery(w dns.ResponseWriter, r *dns.Msg, instances []*tor.Instance,
 }
 
 func StartDNSProxyServer(ctx context.Context, instances []*tor.Instance, appCfg *config.AppConfig) {
-	addr := "0.0.0.0:" + appCfg.CommonDNSPort
+	addr := net.JoinHostPort(strings.TrimSpace(appCfg.DNSBindAddr), appCfg.CommonDNSPort)
+	allowed := buildAllowedClientNets(appCfg.LANClientCIDRs)
+
 	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		remote := w.RemoteAddr()
+		if remote != nil {
+			ipStr, _, _ := net.SplitHostPort(remote.String())
+			if ip := net.ParseIP(ipStr); ip != nil && !ipInNets(ip, allowed) {
+				m := new(dns.Msg)
+				m.SetRcode(r, dns.RcodeRefused)
+				w.WriteMsg(m)
+				return
+			}
+		}
 		handleDNSQuery(w, r, instances, appCfg)
 	})
 

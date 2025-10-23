@@ -6,20 +6,83 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
-	"golang.org/x/net/proxy"
 	"torgo/internal/config"
 	"torgo/internal/lb"
 	"torgo/internal/tor"
+
+	"golang.org/x/net/proxy"
 )
 
-func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCfg *config.AppConfig) {
+// helper: parse a comma-separated list of CIDRs
+func parseCIDRs(list string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, s := range strings.Split(list, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(s)
+		if err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}
+
+// helper: build allowed client networks (always include loopback)
+func buildAllowedClientNets(lanCIDRs string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, cidr := range []string{"127.0.0.0/8", "::1/128"} {
+		_, n, err := net.ParseCIDR(cidr)
+		if err == nil {
+			nets = append(nets, n)
+		}
+	}
+	if strings.TrimSpace(lanCIDRs) != "" {
+		nets = append(nets, parseCIDRs(lanCIDRs)...)
+	}
+	return nets
+}
+
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// helper: identify private/local/reserved ranges we don't want to proxy by default
+func isPrivateOrLocalIP(ip net.IP) bool {
+	cidrs := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"::1/128",
+		"fe80::/10",
+		"fc00::/7",
+	}
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err == nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCfg *config.AppConfig, allowPrivateDest bool) {
 	defer clientConn.Close()
 
 	backendInstance, err := lb.GetNextHealthyInstance(instances)
 	if err != nil {
-		log.Printf("SOCKS: No healthy backend Tor for client %s: %v", clientConn.RemoteAddr(), err)
+		log.Printf("SOCKS: No healthy backend Tor available: %v", err)
 		return
 	}
 
@@ -70,7 +133,7 @@ func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCf
 		return
 	}
 
-	if n < 7 || buf[1] != 1 {
+	if n < 7 || buf[1] != 1 { // only CONNECT supported
 		clientConn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
@@ -82,12 +145,17 @@ func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCf
 		if n < addrCursor+net.IPv4len+2 {
 			return
 		}
-		targetHost = net.IP(buf[addrCursor : addrCursor+net.IPv4len]).String()
+		ip := net.IP(buf[addrCursor : addrCursor+net.IPv4len])
+		if !allowPrivateDest && isPrivateOrLocalIP(ip) {
+			clientConn.Write([]byte{0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			return
+		}
+		targetHost = ip.String()
 		addrCursor += net.IPv4len
 	case 3: // Domain
 		domainLen := int(buf[addrCursor])
 		addrCursor++
-		if n < addrCursor+domainLen+2 {
+		if domainLen == 0 || n < addrCursor+domainLen+2 {
 			return
 		}
 		targetHost = string(buf[addrCursor : addrCursor+domainLen])
@@ -96,7 +164,12 @@ func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCf
 		if n < addrCursor+net.IPv6len+2 {
 			return
 		}
-		targetHost = net.IP(buf[addrCursor : addrCursor+net.IPv6len]).String()
+		ip := net.IP(buf[addrCursor : addrCursor+net.IPv6len])
+		if !allowPrivateDest && isPrivateOrLocalIP(ip) {
+			clientConn.Write([]byte{0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			return
+		}
+		targetHost = ip.String()
 		addrCursor += net.IPv6len
 	default:
 		clientConn.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
@@ -131,6 +204,16 @@ func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCf
 		return
 	}
 
+	// Best-effort keepalive on TCP connections
+	if tc, ok := clientConn.(*net.TCPConn); ok {
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(2 * time.Minute)
+	}
+	if tc, ok := targetTCPConn.(*net.TCPConn); ok {
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(2 * time.Minute)
+	}
+
 	errChan := make(chan error, 2)
 	go func() { _, err := io.Copy(targetTCPConn, clientConn); errChan <- err }()
 	go func() { _, err := io.Copy(clientConn, targetTCPConn); errChan <- err }()
@@ -139,12 +222,19 @@ func handleSocksConnection(clientConn net.Conn, instances []*tor.Instance, appCf
 }
 
 func StartSocksProxyServer(ctx context.Context, instances []*tor.Instance, appCfg *config.AppConfig) {
-	listenAddr := "0.0.0.0:" + appCfg.CommonSocksPort
+	bindIP := strings.TrimSpace(appCfg.SocksBindAddr)
+	if bindIP == "" {
+		bindIP = "0.0.0.0"
+	}
+	listenAddr := net.JoinHostPort(bindIP, appCfg.CommonSocksPort)
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		log.Fatalf("SOCKS: Failed to start SOCKS5 proxy server on %s: %v", listenAddr, err)
 	}
 	log.Printf("SOCKS5 proxy server listening on %s", listenAddr)
+
+	allowedClientNets := buildAllowedClientNets(appCfg.LANClientCIDRs)
+	allowPrivateDest := appCfg.AllowPrivateDest
 
 	go func() {
 		<-ctx.Done()
@@ -158,12 +248,26 @@ func StartSocksProxyServer(ctx context.Context, instances []*tor.Instance, appCf
 			select {
 			case <-ctx.Done():
 				log.Println("SOCKS Proxy: Listener closed as part of shutdown.")
+				return
 			default:
 				log.Printf("SOCKS: Failed to accept connection: %v", err)
+				continue
 			}
-			break
 		}
-		go handleSocksConnection(conn, instances, appCfg)
+
+		// Access control: allow only loopback and configured LAN CIDRs
+		remoteHost, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+		if ip := net.ParseIP(remoteHost); ip != nil && !ipInNets(ip, allowedClientNets) {
+			_ = conn.Close()
+			continue
+		}
+
+		// Enable keepalive on accepted client connection
+		if tc, ok := conn.(*net.TCPConn); ok {
+			_ = tc.SetKeepAlive(true)
+			_ = tc.SetKeepAlivePeriod(2 * time.Minute)
+		}
+
+		go handleSocksConnection(conn, instances, appCfg, allowPrivateDest)
 	}
-	log.Println("SOCKS Proxy: Server has shut down.")
 }

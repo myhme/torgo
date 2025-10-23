@@ -30,6 +30,13 @@ services:
       - IP_DIVERSITY_CHECK_INTERVAL_SECONDS=${IP_DIVERSITY_CHECK_INTERVAL_SECONDS:-300}
       - AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS=${AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS:-3600}
       - DNS_CACHE_ENABLED=${DNS_CACHE_ENABLED:-true}
+
+      # --- Privacy/Security & Binding ---
+      - API_BIND_ADDR=${API_BIND_ADDR:-0.0.0.0}
+      - TORGO_SOCKS_BIND_ADDR=${TORGO_SOCKS_BIND_ADDR:-0.0.0.0}
+      - TORGO_DNS_BIND_ADDR=${TORGO_DNS_BIND_ADDR:-0.0.0.0}
+      - TORGO_LAN_CIDR=${TORGO_LAN_CIDR:-}
+      - TORGO_ALLOW_PRIVATE_DEST=${TORGO_ALLOW_PRIVATE_DEST:-false}
       
       # --- NEW: Transparent Proxy Mode ---
       # Set to "true" to enable the transparent gateway.
