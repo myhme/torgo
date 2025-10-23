@@ -16,21 +16,25 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/proxy"
 	"torgo/internal/config"
+	"torgo/internal/secmem"
+
+	"golang.org/x/net/proxy"
 )
 
 type Instance struct {
-	InstanceID                int
-	controlHost               string
-	backendSocksHost          string
-	backendDNSHost            string
-	AuthCookiePath            string
-	DataDir                   string
-	mu                        sync.Mutex
-	httpClient                *http.Client
-	activeControlConn         net.Conn
-	controlCookieHex          string
+	InstanceID        int
+	controlHost       string
+	backendSocksHost  string
+	backendDNSHost    string
+	AuthCookiePath    string
+	DataDir           string
+	mu                sync.Mutex
+	httpClient        *http.Client
+	activeControlConn net.Conn
+	// Encrypted control cookie held only in memory
+	controlCookieNonce        []byte
+	controlCookieCipher       []byte
 	isHealthy                 bool
 	lastHealthCheck           time.Time
 	consecutiveFailures       int
@@ -65,33 +69,43 @@ func New(id int, appCfg *config.AppConfig) *Instance {
 	return ti
 }
 
-func (ti *Instance) GetControlHost() string {
-	return ti.controlHost
-}
-
-func (ti *Instance) GetBackendSocksHost() string {
-	return ti.backendSocksHost
-}
-
-func (ti *Instance) GetBackendDNSHost() string {
-	return ti.backendDNSHost
-}
+func (ti *Instance) GetControlHost() string      { return ti.controlHost }
+func (ti *Instance) GetBackendSocksHost() string { return ti.backendSocksHost }
+func (ti *Instance) GetBackendDNSHost() string   { return ti.backendDNSHost }
 
 func (ti *Instance) loadAndCacheControlCookieUnlocked(forceReload bool) error {
-	if ti.controlCookieHex != "" && !forceReload {
+	if ti.controlCookieCipher != nil && !forceReload {
 		return nil
 	}
 	cookieBytes, err := os.ReadFile(ti.AuthCookiePath)
 	if err != nil {
-		ti.controlCookieHex = ""
+		ti.clearCachedCookie()
 		return fmt.Errorf("instance %d: failed to read auth cookie %s: %w", ti.InstanceID, ti.AuthCookiePath, err)
 	}
-	ti.controlCookieHex = hex.EncodeToString(cookieBytes)
+	n, c, err := secmem.Seal(cookieBytes)
+	secmem.Zeroize(cookieBytes)
+	if err != nil {
+		ti.clearCachedCookie()
+		return fmt.Errorf("instance %d: failed to encrypt control cookie: %w", ti.InstanceID, err)
+	}
+	ti.controlCookieNonce = n
+	ti.controlCookieCipher = c
 	return nil
 }
 
+func (ti *Instance) clearCachedCookie() {
+	if ti.controlCookieCipher != nil {
+		secmem.Zeroize(ti.controlCookieCipher)
+		ti.controlCookieCipher = nil
+	}
+	if ti.controlCookieNonce != nil {
+		secmem.Zeroize(ti.controlCookieNonce)
+		ti.controlCookieNonce = nil
+	}
+}
+
 func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, error) {
-	if err := ti.loadAndCacheControlCookieUnlocked(ti.controlCookieHex == ""); err != nil {
+	if err := ti.loadAndCacheControlCookieUnlocked(ti.controlCookieCipher == nil); err != nil {
 		return nil, nil, fmt.Errorf("instance %d: pre-connect cookie load failed: %w", ti.InstanceID, err)
 	}
 
@@ -100,10 +114,26 @@ func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, erro
 		return nil, nil, fmt.Errorf("instance %d: failed to connect to control port %s: %w", ti.InstanceID, ti.controlHost, err)
 	}
 
-	authCmd := fmt.Sprintf("AUTHENTICATE %s\r\n", ti.controlCookieHex)
+	plainCookie, err := secmem.Open(ti.controlCookieNonce, ti.controlCookieCipher)
+	if err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("instance %d: failed to decrypt control cookie: %w", ti.InstanceID, err)
+	}
+	hexBuf := make([]byte, len(plainCookie)*2)
+	hex.Encode(hexBuf, plainCookie)
+	secmem.Zeroize(plainCookie)
+
+	// Build AUTHENTICATE command without creating Go strings
+	authCmd := make([]byte, 0, len("AUTHENTICATE ")+len(hexBuf)+2)
+	authCmd = append(authCmd, []byte("AUTHENTICATE ")...)
+	authCmd = append(authCmd, hexBuf...)
+	authCmd = append(authCmd, '\r', '\n')
+
 	conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	_, err = conn.Write([]byte(authCmd))
+	_, err = conn.Write(authCmd)
 	conn.SetWriteDeadline(time.Time{})
+	secmem.Zeroize(hexBuf)
+	secmem.Zeroize(authCmd)
 	if err != nil {
 		conn.Close()
 		return nil, nil, fmt.Errorf("instance %d: failed to send AUTHENTICATE command: %w", ti.InstanceID, err)
@@ -123,7 +153,7 @@ func (ti *Instance) connectToTorControlUnlocked() (net.Conn, *bufio.Reader, erro
 		conn.Close()
 		if strings.HasPrefix(trimmedStatus, "515") {
 			log.Printf("Instance %d: Control port authentication failed. Invalidating cookie.", ti.InstanceID)
-			ti.controlCookieHex = ""
+			ti.clearCachedCookie()
 		}
 		return nil, nil, fmt.Errorf("instance %d: tor control port authentication failed: %s", ti.InstanceID, trimmedStatus)
 	}
@@ -259,10 +289,10 @@ func (ti *Instance) IsCurrentlyHealthy() bool {
 }
 func (ti *Instance) IncrementActiveConnections() { ti.activeConnections.Add(1) }
 func (ti *Instance) DecrementActiveConnections() { ti.activeConnections.Add(-1) }
-func (ti *Instance) GetActiveConnections() int64  { return ti.activeConnections.Load() }
-func (ti *Instance) IsDraining() bool             { return ti.isDraining.Load() }
-func (ti *Instance) StartDraining()               { ti.isDraining.Store(true) }
-func (ti *Instance) StopDraining()                { ti.isDraining.Store(false) }
+func (ti *Instance) GetActiveConnections() int64 { return ti.activeConnections.Load() }
+func (ti *Instance) IsDraining() bool            { return ti.isDraining.Load() }
+func (ti *Instance) StartDraining()              { ti.isDraining.Store(true) }
+func (ti *Instance) StopDraining()               { ti.isDraining.Store(false) }
 
 func (ti *Instance) initializeHTTPClientUnlocked() {
 	dialer, err := proxy.SOCKS5("tcp", ti.backendSocksHost, nil, &net.Dialer{
@@ -332,19 +362,19 @@ func (ti *Instance) GetConfigSnapshot() map[string]interface{} {
 	ti.mu.Lock()
 	defer ti.mu.Unlock()
 	return map[string]interface{}{
-		"instance_id":                  ti.InstanceID,
-		"control_host":                 ti.controlHost,
-		"backend_socks_host":           ti.backendSocksHost,
-		"backend_dns_host":             ti.backendDNSHost,
-		"is_healthy":                   ti.isHealthy,
-		"last_health_check_at":         ti.lastHealthCheck.Format(time.RFC3339Nano),
-		"consecutive_failures":         ti.consecutiveFailures,
-		"external_ip":                  ti.externalIP,
-		"last_ip_check_at":             ti.lastIPCheck.Format(time.RFC3339Nano),
-		"last_ip_change_at":            ti.lastIPChangeTime.Format(time.RFC3339Nano),
-		"last_circuit_recreation_at":   ti.lastCircuitRecreationTime.Format(time.RFC3339Nano),
-		"last_diversity_rotate_at":     ti.lastDiversityRotate.Format(time.RFC3339Nano),
-		"is_draining":                  ti.IsDraining(),
-		"active_connections":           ti.GetActiveConnections(),
+		"instance_id":                ti.InstanceID,
+		"control_host":               ti.controlHost,
+		"backend_socks_host":         ti.backendSocksHost,
+		"backend_dns_host":           ti.backendDNSHost,
+		"is_healthy":                 ti.isHealthy,
+		"last_health_check_at":       ti.lastHealthCheck.Format(time.RFC3339Nano),
+		"consecutive_failures":       ti.consecutiveFailures,
+		"external_ip":                ti.externalIP,
+		"last_ip_check_at":           ti.lastIPCheck.Format(time.RFC3339Nano),
+		"last_ip_change_at":          ti.lastIPChangeTime.Format(time.RFC3339Nano),
+		"last_circuit_recreation_at": ti.lastCircuitRecreationTime.Format(time.RFC3339Nano),
+		"last_diversity_rotate_at":   ti.lastDiversityRotate.Format(time.RFC3339Nano),
+		"is_draining":                ti.IsDraining(),
+		"active_connections":         ti.GetActiveConnections(),
 	}
 }

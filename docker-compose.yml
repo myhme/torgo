@@ -10,6 +10,15 @@ services:
     # It allows the entrypoint script to manipulate network rules with iptables.
     cap_add:
       - NET_ADMIN
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      core: 0
+    tmpfs:
+      - /var/lib/tor:rw,noexec,nosuid,nodev,size=512m,mode=0700
+      - /run:rw,nosuid,nodev,size=64m,mode=0755
     ports:
       - "${API_PORT:-8080}:8080"
       - "${COMMON_SOCKS_PROXY_PORT:-9000}:9000"

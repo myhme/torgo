@@ -16,6 +16,7 @@ import (
 	"torgo/internal/dns"
 	"torgo/internal/health"
 	"torgo/internal/rotation"
+	"torgo/internal/secmem"
 	"torgo/internal/socks"
 	"torgo/internal/tor"
 )
@@ -23,6 +24,15 @@ import (
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
 	log.Println("Starting torgo application...")
+
+	// Best-effort hardening before anything sensitive loads
+	secmem.DisableCoreDumpsAndPtrace()
+	if err := secmem.Init(); err != nil {
+		log.Fatalf("Failed to initialize secure memory: %v", err)
+	}
+	if err := secmem.LockProcessMemoryBestEffort(); err != nil {
+		log.Printf("Warning: mlockall failed (continuing): %v", err)
+	}
 
 	appCfg := config.LoadConfig()
 
@@ -115,6 +125,8 @@ func main() {
 	for _, instance := range backendInstances {
 		instance.CloseControlConnection()
 	}
+
+	secmem.Wipe()
 
 	log.Println("Torgo application shut down gracefully.")
 }
