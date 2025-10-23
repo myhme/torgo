@@ -11,7 +11,7 @@ TOR_USER="_tor"
 TOR_DATA_BASE_DIR="/var/lib/tor"
 TOR_RUN_DIR="/var/run/tor"
 TORRC_TEMPLATE_PATH="/etc/tor/torrc.template"
-TORRC_DIR="/etc/tor"
+TORRC_DIR="/run/tor"
 
 # --- Tor Instance Setup ---
 if ! [[ "$TOR_INSTANCES" =~ ^[0-9]+$ ]] || [ "$TOR_INSTANCES" -lt 1 ]; then
@@ -22,7 +22,7 @@ echo "Tor Daemons Service: Preparing to start $TOR_INSTANCES Tor instance(s)..."
 if ! getent group _tor > /dev/null; then addgroup -S _tor; fi
 if ! getent passwd _tor > /dev/null; then adduser -S -G _tor -h /var/lib/tor -s /sbin/nologin _tor; fi
 
-mkdir -p "$TOR_RUN_DIR" "$TOR_DATA_BASE_DIR"
+mkdir -p "$TOR_RUN_DIR" "$TOR_DATA_BASE_DIR" "$TORRC_DIR"
 chown -R "${TOR_USER}:${TOR_USER}" "$TOR_RUN_DIR" "$TOR_DATA_BASE_DIR"
 chmod 700 "$TOR_RUN_DIR" "$TOR_DATA_BASE_DIR"
 
