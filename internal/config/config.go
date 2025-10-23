@@ -34,6 +34,7 @@ const (
 	DefaultDNSCacheDefaultMinTTLSeconds     = 60
 	DefaultDNSCacheMinTTLOverrideSeconds    = 0
 	DefaultDNSCacheMaxTTLOverrideSeconds    = 86400
+	DefaultAPIAccessEnabled                 = false
 )
 
 type AppConfig struct {
@@ -62,6 +63,7 @@ type AppConfig struct {
 	DNSCacheDefaultMinTTLSeconds    int
 	DNSCacheMinTTLOverrideSeconds   int
 	DNSCacheMaxTTLOverrideSeconds   int
+	APIAccessEnabled                bool
 
 	// Privacy/Security and Binding
 	SocksBindAddr    string
@@ -154,6 +156,7 @@ func LoadConfig() *AppConfig {
 		cfg.DNSCacheDefaultMinTTLSeconds = getIntEnv("DNS_CACHE_DEFAULT_MIN_TTL_SECONDS", DefaultDNSCacheDefaultMinTTLSeconds)
 		cfg.DNSCacheMinTTLOverrideSeconds = getIntEnv("DNS_CACHE_MIN_TTL_OVERRIDE_SECONDS", DefaultDNSCacheMinTTLOverrideSeconds)
 		cfg.DNSCacheMaxTTLOverrideSeconds = getIntEnv("DNS_CACHE_MAX_TTL_OVERRIDE_SECONDS", DefaultDNSCacheMaxTTLOverrideSeconds)
+		cfg.APIAccessEnabled = getBoolEnv("API_ACCESS_ENABLE", DefaultAPIAccessEnabled)
 
 		// Privacy/Security bindings
 		cfg.SocksBindAddr = getStringEnv("TORGO_SOCKS_BIND_ADDR", "0.0.0.0")

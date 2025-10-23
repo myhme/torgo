@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -30,8 +31,13 @@ func main() {
 	if err := secmem.Init(); err != nil {
 		log.Fatalf("Failed to initialize secure memory: %v", err)
 	}
-	if err := secmem.LockProcessMemoryBestEffort(); err != nil {
-		log.Printf("Warning: mlockall failed (continuing): %v", err)
+	lockErr := secmem.LockProcessMemoryBestEffort()
+	requireMlock := strings.EqualFold(os.Getenv("SECMEM_REQUIRE_MLOCK"), "1") || strings.EqualFold(os.Getenv("SECMEM_REQUIRE_MLOCK"), "true")
+	if lockErr != nil {
+		if requireMlock {
+			log.Fatalf("mlockall required but failed: %v", lockErr)
+		}
+		log.Printf("Warning: mlockall failed (continuing): %v", lockErr)
 	}
 
 	appCfg := config.LoadConfig()
@@ -86,39 +92,49 @@ func main() {
 		log.Println("Automatic Circuit Rotation Monitor: Disabled by configuration.")
 	}
 
-	httpMux := http.NewServeMux()
-	api.RegisterWebUIHandlers(httpMux)
-	api.RegisterAPIHandlers(httpMux, backendInstances, appCfg)
+	if appCfg.APIAccessEnabled {
+		httpMux := http.NewServeMux()
+		api.RegisterWebUIHandlers(httpMux)
+		api.RegisterAPIHandlers(httpMux, backendInstances, appCfg)
 
-	apiAddr := net.JoinHostPort(appCfg.APIBindAddr, appCfg.APIPort)
-	apiServer := &http.Server{
-		Addr:              apiAddr,
-		Handler:           httpMux,
-		ReadTimeout:       15 * time.Second,
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-
-	go func() {
-		log.Printf("Management API server (and WebUI at /webui) listening on %s", apiAddr)
-		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start management API server: %v", err)
+		apiAddr := net.JoinHostPort(appCfg.APIBindAddr, appCfg.APIPort)
+		apiServer := &http.Server{
+			Addr:              apiAddr,
+			Handler:           httpMux,
+			ReadTimeout:       15 * time.Second,
+			ReadHeaderTimeout: 10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		}
-	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-quit
-	log.Printf("Received signal: %s. Shutting down...", sig)
+		go func() {
+			log.Printf("Management API server (and WebUI at /webui) listening on %s", apiAddr)
+			if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("Failed to start management API server: %v", err)
+			}
+		}()
 
-	cancel()
+		quit := make(chan os.Signal, 1)
+		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-quit
+		log.Printf("Received signal: %s. Shutting down...", sig)
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 35*time.Second)
-	defer shutdownCancel()
+		cancel()
 
-	if err := apiServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("API server shutdown error: %v", err)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer shutdownCancel()
+
+		if err := apiServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("API server shutdown error: %v", err)
+		}
+	} else {
+		log.Println("API/WebUI disabled by configuration (API_ACCESS_ENABLE=false).")
+		quit := make(chan os.Signal, 1)
+		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-quit
+		log.Printf("Received signal: %s. Shutting down...", sig)
+
+		cancel()
 	}
 
 	log.Println("Closing Tor instance control connections...")
