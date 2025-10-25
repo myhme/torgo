@@ -20,8 +20,8 @@ RUN apk add --no-cache \
     privoxy \
     iptables \
     xz \
-    bash
-#    curl
+    bash \
+    curl
 
 # Ensure runtime user/group exist at build-time (read-only rootfs at runtime)
 RUN addgroup -S _tor 2>/dev/null || true && \
