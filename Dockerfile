@@ -19,9 +19,10 @@ RUN apk add --no-cache \
     tor \
     privoxy \
     iptables \
-    xz \
-    bash \
-    curl
+    xz
+    
+#    bash \
+#    curl
 
 # Ensure runtime user/group exist at build-time (read-only rootfs at runtime)
 RUN addgroup -S _tor 2>/dev/null || true && \
@@ -50,8 +51,8 @@ WORKDIR /app
 COPY --from=builder /app/torgo-app .
 COPY torrc.template /etc/tor/
 COPY privoxy.conf.template /etc/privoxy/
-COPY docker-healthcheck.sh /app/
-RUN chmod +x /app/docker-healthcheck.sh
+#COPY docker-healthcheck.sh /app/
+#RUN chmod +x /app/docker-healthcheck.sh
 
 
 # --- S6-Overlay Service Configuration ---
