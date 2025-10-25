@@ -19,9 +19,8 @@ RUN apk add --no-cache \
     tor \
     privoxy \
     iptables \
-    xz
-    
-#    bash \
+    xz \
+    bash
 #    curl
 
 # Ensure runtime user/group exist at build-time (read-only rootfs at runtime)
