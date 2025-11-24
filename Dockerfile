@@ -28,10 +28,11 @@ RUN apk add --no-cache --virtual .build-deps \
     build-base \
     && mkdir -p /build /cache /tmp/go-cache
 
-# Create a dedicated build user to avoid root build where possible
-RUN addgroup -g ${BUILD_USER_GID} buildergroup \
-    && adduser -D -u ${BUILD_USER_UID} -G buildergroup builder \
-    && chown -R builder:buildergroup /build /cache /tmp/go-cache
+# Create dedicated build user (non-root)
+RUN addgroup -S -g ${BUILD_USER_GID} buildergroup \
+ && adduser  -S -D -u ${BUILD_USER_UID} -G buildergroup builder \
+ && chown -R builder:buildergroup /build /cache /tmp/go-cache
+
 
 # Set environment for reproducible Go builds
 ENV CGO_ENABLED=1 \
