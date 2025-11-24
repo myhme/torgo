@@ -49,14 +49,14 @@ COPY go.* ./
 
 # Run module download as the non-root build user using BuildKit cache mounts
 USER builder
-RUN --mount=type=cache,target=${GOMODCACHE} \
-    --mount=type=cache,target=/cache/go-build \
+RUN --mount=type=cache,target=${GOMODCACHE},uid=${BUILD_USER_UID},gid=${BUILD_USER_GID} \
+    --mount=type=cache,target=/cache/go-build,uid=${BUILD_USER_UID},gid=${BUILD_USER_GID} \
     go mod download
 
 # Copy rest of the source and build using cache mount for build cache
 COPY --chown=builder:buildergroup . .
-RUN --mount=type=cache,target=${GOMODCACHE} \
-    --mount=type=cache,target=/cache/go-build \
+RUN --mount=type=cache,target=${GOMODCACHE},uid=${BUILD_USER_UID},gid=${BUILD_USER_GID} \
+    --mount=type=cache,target=/cache/go-build,uid=${BUILD_USER_UID},gid=${BUILD_USER_GID} \
     CGO_ENABLED=${CGO_ENABLED} go build -trimpath -ldflags='-s -w -extldflags=-static -buildid=' -o /${APP_NAME} ./cmd/${APP_NAME} \
     && strip --strip-all /${APP_NAME}
 
