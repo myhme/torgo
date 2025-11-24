@@ -80,9 +80,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           
-          # FIX: Cleaned up the outputs block. This must be a clean, single multiline string.
+          # FIX 1: Simplify outputs by removing attestation configuration from here.
+          # We only need the image name/tagging configuration.
           outputs: |
-            type=image,name=ghcr.io/${{ github.repository_owner }}/torgo,push-by-digest=true,push=${{ github.event.inputs.dry_run != 'true' }},attestations=type=sbom,type=provenance,mode=max
+            type=image,name=ghcr.io/${{ github.repository_owner }}/torgo,push-by-digest=true,push=${{ github.event.inputs.dry_run != 'true' }}
+            
+          # FIX 2: Use the dedicated 'attests' input which is cleaner for V6.
+          attests: |
+            type=sbom,mode=max
+            type=provenance,mode=max
             
       - name: Export digest list
         if: github.event.inputs.dry_run != 'true'
