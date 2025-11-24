@@ -16,7 +16,7 @@ RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -extldflags=-static -buildi
 # --- STAGE 1: TOR DEPENDENCIES (Dedicated to install 'tor' and dependencies) ---
 FROM alpine:latest AS deps
 # Install tor and its core dynamic dependencies explicitly for better consistency
-RUN apk add --no-cache tor libssl3 libcrypto3 libevent libz \
+RUN apk add --no-cache tor libssl3 libcrypto3 libevent zlib \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
 
 # --- STAGE 2: FINAL DISTROLESS IMAGE ---
