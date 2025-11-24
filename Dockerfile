@@ -1,10 +1,16 @@
 # --- Builder Stage ---
 FROM golang:1.25-alpine AS builder
+
+# 1. (Temporary Root) Install build dependencies as root
+# This is necessary because 'apk add' needs to write to the root-owned package database.
+RUN apk add --no-cache --virtual .build-deps git gcc musl-dev
+
+# 2. Switch to non-root user for Go build process
 USER nobody
-# FIX: Set GOMODCACHE to a writable location (like /tmp) to avoid 'permission denied'
+# FIX: Set GOMODCACHE to a writable location (/tmp/go-cache) to avoid 'permission denied'
 # when running 'go mod download' as a non-root user with BuildKit cache mounts.
 ENV GOMODCACHE=/tmp/go-cache
-RUN apk add --no-cache --virtual .build-deps git gcc musl-dev
+
 WORKDIR /src
 COPY go.* ./
 # Use the updated GOMODCACHE path as the cache target
@@ -38,5 +44,5 @@ COPY --from=builder /torgo /usr/local/bin/torgo
 COPY torrc.template /etc/tor/torrc.template
 
 # Use the non-root user that Tor runs as
-USER 106:106
+USER 106:112
 ENTRYPOINT ["/usr/local/bin/torgo"]
