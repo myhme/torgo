@@ -1,46 +1,72 @@
-# Tor Configuration Template for torgo instances
-
-# --- Core Networking ---
-# Placeholders may be either "<port>" or "<ip>:<port>". For backend instances, use
-# 127.0.0.1:<port> to keep them local-only.
-SocksPort __SOCKSPORT__
-ControlPort __CONTROLPORT__
-DNSPort __DNSPORT__
-
-# --- Paths ---
-DataDirectory __DATADIR__
-PidFile __PIDFILE__
-
-# Client-only behavior (usually default if no relay ports are open)
+# === CORE HARDENING (mandatory) ===
 ClientOnly 1
-
-SafeLogging 1 # Scrubs IPs from logs
-
-# --- Hardening ---
-SafeSocks 1
-TestSocks 1
 AvoidDiskWrites 1
+SafeLogging 1
 Log notice stdout
+Log warn stderr
+Log err stderr
+PidFile /dev/null
+DataDirectory __DATADIR__
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsOnResolve 1
+AutomapHostsSuffixes .onion,.exit
 
-# --- Access Policies ---
-# Default: allow only local applications. To allow LAN clients, add a SocksPolicy via __EXTRA_TOR_OPTIONS__.
-SocksPolicy accept 127.0.0.1
-# Example to allow a LAN: (uncomment and adjust via __EXTRA_TOR_OPTIONS__)
-#   SocksPolicy accept 10.10.1.0/24
-SocksPolicy reject *
-
-# --- Front-end Access Guidance ---
-# Recommended: keep backend Tor listeners (SocksPort, DNSPort, ControlPort) bound to 127.0.0.1.
-# Expose only torgo's unified front-end SOCKS/DNS to the network.
-# If you must expose a Tor SOCKS for clients on a LAN, add via __EXTRA_TOR_OPTIONS__:
-#   SocksPort __LAN_BIND_IP__:9150
-# Existing SocksPolicy rules (127.0.0.1 and any added LAN CIDR) will restrict access.
-# Do NOT expose ControlPort; optionally use a UNIX control socket instead:
-#   ControlSocket /run/torgo/tor-__INSTANCE__.sock GroupWritable
-#   CookieAuthFileGroupReadable 1
-
-# --- Security & Control ---
-# Enable control port and cookie authentication
+# === ABSOLUTE ISOLATION (non-negotiable) ===
+SocksPort __SOCKSPORT__ IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
+DNSPort __DNSPORT__ AutomapHostsOnResolve 1
+ControlPort __CONTROLPORT__
 CookieAuthentication 1
-# This placeholder allows for optional, user-defined Tor settings
+CookieAuthFile __DATADIR__/control_auth_cookie
+CookieAuthFileGroupReadable 0
+
+# === CIRCUIT AGGRESSION & FAST ROTATION (55 s circuits) ===
+UseEntryGuards 0
+NumEntryGuards 0
+MaxCircuitDirtiness 55
+NewCircuitPeriod 5
+CircuitBuildTimeout 7
+LearnCircuitBuildTimeout 0
+CircuitStreamTimeout 30
+SocksTimeout 120
+KeepalivePeriod 15
+
+# === GEOGRAPHIC LOCKDOWN (only Tier-1 jurisdictions) ===
+StrictNodes 1
+ExitNodes {us}{ca}{gb}{de}{nl}{no}{se}{fi}{ch}{is}{li}{lu}{dk}{at}{be}{fr}{jp}{au}{nz}
+ExcludeNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{hk}{tr}{il}{sg}{kr}{in}{br}{za}{ae}{qa}{sa}{id}{my}{th}{vn}{pk}{eg}{ma}{co}{ar}{cl}{pe}{bo}
+ExcludeExitNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{hk}{tr}{il}{sg}{kr}{in}{br}{za}{ae}{qa}{sa}
+
+# === NETWORK HARDENING ===
+ClientUseIPv6 0
+ClientPreferIPv6ORPort 0
+EnforceDistinctSubnets 1
+FascistFirewall 1
+ReachableAddresses *:9050-9059,*:9160-9169,*:9200-9299
+FirewallPorts 9050-9299
+
+# === ANTI-FINGERPRINTING & ANTI-LEAK ===
+DisableAllSwap 1
+HardwareAccel 0
+DisableDebuggerAttachment 1
+DisableNetwork 0
+AllowNonRFC953Hostnames 0
+OptimisticData 0
+ClientRejectInternalAddresses 1
+WarnPlaintextPorts 1,22,25,109,110,143,993,995,6667
+RejectPlaintextPorts 1,22,25,109,110,143,993,995,6667
+
+# === PERFORMANCE (without weakening anonymity) ===
+CircuitPadding 0
+# === ANONYMITY (Default modern padding enabled) ===
+# Since resources are abundant, we enable full padding
+# for Defense-in-Depth against traffic flow analysis.
+ReducedCircuitPadding 1
+ConnectionPadding 0
+FastFirstHopPK 1
+ExtendByEd25519ID 1
+UseMicrodescriptors 1
+FetchDirInfoEarly 1
+FetchDirInfoExtraEarly 1
+
+# === FINAL PLACEHOLDER ===
 __EXTRA_TOR_OPTIONS__

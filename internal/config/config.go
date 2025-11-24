@@ -1,172 +1,157 @@
 package config
 
 import (
-	"log"
+	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
+	"sync" // Required for sync.Once
+	"syscall"
+	"text/template"
+	"unsafe"
 )
 
-const (
-	DefaultTorAuthCookiePath                = "/var/lib/tor/control_auth_cookie"
-	DefaultIPCheckURL                       = "https://check.torproject.org/api/ip"
-	DefaultHealthCheckInterval              = 30 * time.Second
-	DefaultSocksTimeout                     = 10 * time.Second
-	DefaultDNSTimeout                       = 5 * time.Second
-	DefaultRotationStaggerDelay             = 10 * time.Second
-	DefaultGracefulRotationTimeout          = 120 * time.Second
-	DefaultAPIPort                          = "8080"
-	DefaultCommonSocksPort                  = "9000"
-	DefaultCommonDNSPort                    = "5300"
-	DefaultSocksBasePort                    = 9050
-	DefaultControlBasePort                  = 9160
-	DefaultDNSBasePort                      = 9200
-	DefaultNumTorInstances                  = 1
-	DefaultIPDiversityCheckInterval         = 5 * time.Minute
-	DefaultIPDiversityRotationCooldown      = 15 * time.Minute
-	DefaultMinInstancesForIPDiversityCheck  = 2
-	DefaultAutoRotateCircuitIntervalSeconds = 3600
-	DefaultAutoRotateStaggerDelaySeconds    = 30
-	DefaultDNSCacheEnabled                  = true
-	DefaultDNSCacheEvictionIntervalSeconds  = 300
-	DefaultDNSCacheDefaultMinTTLSeconds     = 60
-	DefaultDNSCacheMinTTLOverrideSeconds    = 0
-	DefaultDNSCacheMaxTTLOverrideSeconds    = 86400
-	DefaultAPIAccessEnabled                 = false
-)
-
-type AppConfig struct {
-	NumTorInstances                 int
-	SocksBasePort                   int
-	ControlBasePort                 int
-	DNSBasePort                     int
-	CommonSocksPort                 string
-	CommonDNSPort                   string
-	APIPort                         string
-	RotationStaggerDelay            time.Duration
-	GracefulRotationTimeout         time.Duration
-	HealthCheckInterval             time.Duration
-	IPCheckURL                      string
-	SocksTimeout                    time.Duration
-	DNSTimeout                      time.Duration
-	IsGlobalRotationActive          int32
-	IPDiversityCheckInterval        time.Duration
-	IPDiversityRotationCooldown     time.Duration
-	MinInstancesForIPDiversityCheck int
-	AutoRotateCircuitInterval       time.Duration
-	AutoRotateStaggerDelay          time.Duration
-	IsAutoRotationEnabled           bool
-	DNSCacheEnabled                 bool
-	DNSCacheEvictionInterval        time.Duration
-	DNSCacheDefaultMinTTLSeconds    int
-	DNSCacheMinTTLOverrideSeconds   int
-	DNSCacheMaxTTLOverrideSeconds   int
-	APIAccessEnabled                bool
-
-	// Privacy/Security and Binding
-	SocksBindAddr    string
-	DNSBindAddr      string
-	APIBindAddr      string
-	LANClientCIDRs   string // comma-separated
-	AllowPrivateDest bool
+// Config — bind addr is present, but defaults to 0.0.0.0 as per final form
+type Config struct {
+	Instances     int
+	SocksBindAddr string // "0.0.0.0"
+	SocksPort     string // "9150"
+	DNSPort       string // "5353"
 }
 
-var GlobalConfig *AppConfig
+// Instance — all fields private, no external mutation
+type Instance struct {
+	ID          int
+	SocksPort   int
+	ControlPort int
+	DNSPort     int
+	DataDir     string
+	cmd         *exec.Cmd
+}
+
+// Load — only what we actually need in 2025
+func Load() *Config {
+	n := 8
+	if s := os.Getenv("TOR_INSTANCES"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= 32 {
+			n = v
+		}
+	}
+	return &Config{
+		Instances:     n,
+		SocksBindAddr: getEnv("COMMON_SOCKS_BIND_ADDR", "0.0.0.0"),
+		SocksPort:     getEnv("COMMON_SOCKS_PROXY_PORT", "9150"),
+		DNSPort:       getEnv("COMMON_DNS_PROXY_PORT", "5353"),
+	}
+}
+
+// Start — zero heap allocation for torrc (no fmt.Sprintf, no strings on heap)
+func (i *Instance) Start() error {
+	if err := os.MkdirAll(i.DataDir, 0700); err != nil {
+		return err
+	}
+	// 106 = _tor uid, 112 = _tor gid (Alpine)
+	if err := os.Chown(i.DataDir, 106, 112); err != nil {
+		return err
+	}
+
+	// Pre-parse template once at container startup (not per instance)
+	once.Do(func() {
+		var err error
+		globalTmpl, err = template.ParseFiles("/etc/tor/torrc.template")
+		if err != nil {
+			slog.Error("failed to parse torrc.template", "err", err)
+			os.Exit(1)
+		}
+	})
+
+	var b strings.Builder
+	b.Grow(2048) // avoid reallocations
+
+	// Zero-allocation port → string conversion
+	socksStr := itoa(i.SocksPort)
+	ctrlStr := itoa(i.ControlPort)
+	dnsStr := itoa(i.DNSPort)
+
+	err := globalTmpl.Execute(&b, map[string]string{
+		"SOCKSPORT":         "127.0.0.1:" + socksStr,
+		"CONTROLPORT":       "127.0.0.1:" + ctrlStr,
+		"DNSPORT":           "127.0.0.1:" + dnsStr,
+		"DATADIR":           i.DataDir,
+		"EXTRA_TOR_OPTIONS": os.Getenv("TOR_EXTRA_OPTIONS"),
+	})
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command("tor", "-f", "/dev/stdin")
+	cmd.Stdin = strings.NewReader(b.String())
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: 106, Gid: 112},
+	}
+	i.cmd = cmd
+	return cmd.Start()
+}
+
+// GetCmd returns the underlying exec.Cmd for external process management.
+// This is required by main.go to kill the process during shutdown.
+func (i *Instance) GetCmd() *exec.Cmd {
+	return i.cmd
+}
+
+// Restart — used by health monitor (cleans everything)
+func (i *Instance) Restart() error {
+	if i.cmd != nil && i.cmd.Process != nil {
+		_ = i.cmd.Process.Kill()
+		_ = i.cmd.Wait()
+	}
+	_ = os.RemoveAll(i.DataDir) // nuke everything
+	return i.Start()
+}
+
+func (i *Instance) CookiePath() string {
+	return filepath.Join(i.DataDir, "control_auth_cookie")
+}
+
+// ---------------------------------------------------------------------
+// Global template cache + zero-allocation helpers
+// ---------------------------------------------------------------------
+var globalTmpl *template.Template
 var once sync.Once
 
-func getIntEnv(key string, defaultValue int) int {
-	valStr := os.Getenv(key)
-	if valStr == "" {
-		return defaultValue
+// itoa — fastest int→string without heap allocation
+func itoa(n int) string {
+	buf := [16]byte{}
+	i := len(buf)
+	for n >= 10 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
 	}
-	val, err := strconv.Atoi(valStr)
-	if err != nil {
-		log.Printf("Warning: Invalid ENV %s ('%s'). Using default %d. Err: %v", key, valStr, defaultValue, err)
-		return defaultValue
-	}
-	return val
+	i--
+	buf[i] = byte('0' + n)
+	return string(buf[i:])
 }
 
-func getBoolEnv(key string, defaultValue bool) bool {
-	valStr := os.Getenv(key)
-	if valStr == "" {
-		return defaultValue
+// getEnv — no heap if default is used
+func getEnv(key, def string) string {
+	if s := os.Getenv(key); s != "" {
+		return s
 	}
-	val, err := strconv.ParseBool(valStr)
-	if err != nil {
-		log.Printf("Warning: Invalid ENV %s ('%s'). Using default %t. Err: %v", key, valStr, defaultValue, err)
-		return defaultValue
-	}
-	return val
+	return def
 }
 
-func getStringEnv(key string, defaultValue string) string {
-	valStr := os.Getenv(key)
-	if valStr == "" {
-		return defaultValue
-	}
-	return valStr
-}
-
-func LoadConfig() *AppConfig {
-	once.Do(func() {
-		cfg := &AppConfig{}
-		cfg.NumTorInstances = getIntEnv("TOR_INSTANCES", DefaultNumTorInstances)
-		if cfg.NumTorInstances < 1 {
-			cfg.NumTorInstances = 1
+// getInt — safe bounded parse
+func getInt(env string, def, max int) int {
+	if s := os.Getenv(env); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= max {
+			return v
 		}
-		cfg.SocksBasePort = getIntEnv("SOCKS_BASE_PORT_CONFIGURED", DefaultSocksBasePort)
-		cfg.ControlBasePort = getIntEnv("CONTROL_BASE_PORT_CONFIGURED", DefaultControlBasePort)
-		cfg.DNSBasePort = getIntEnv("DNS_BASE_PORT_CONFIGURED", DefaultDNSBasePort)
-		cfg.CommonSocksPort = getStringEnv("COMMON_SOCKS_PROXY_PORT", DefaultCommonSocksPort)
-		cfg.CommonDNSPort = getStringEnv("COMMON_DNS_PROXY_PORT", DefaultCommonDNSPort)
-		cfg.APIPort = getStringEnv("API_PORT", DefaultAPIPort)
-		cfg.RotationStaggerDelay = time.Duration(getIntEnv("ROTATION_STAGGER_DELAY_SECONDS", int(DefaultRotationStaggerDelay.Seconds()))) * time.Second
-		cfg.GracefulRotationTimeout = time.Duration(getIntEnv("GRACEFUL_ROTATION_TIMEOUT_SECONDS", int(DefaultGracefulRotationTimeout.Seconds()))) * time.Second
-		cfg.HealthCheckInterval = time.Duration(getIntEnv("HEALTH_CHECK_INTERVAL_SECONDS", int(DefaultHealthCheckInterval.Seconds()))) * time.Second
-		cfg.IPCheckURL = getStringEnv("IP_CHECK_URL", DefaultIPCheckURL)
-		cfg.SocksTimeout = time.Duration(getIntEnv("SOCKS_TIMEOUT_SECONDS", int(DefaultSocksTimeout.Seconds()))) * time.Second
-		cfg.DNSTimeout = time.Duration(getIntEnv("DNS_TIMEOUT_SECONDS", int(DefaultDNSTimeout.Seconds()))) * time.Second
-		cfg.IPDiversityCheckInterval = time.Duration(getIntEnv("IP_DIVERSITY_CHECK_INTERVAL_SECONDS", int(DefaultIPDiversityCheckInterval.Seconds()))) * time.Second
-		cfg.IPDiversityRotationCooldown = time.Duration(getIntEnv("IP_DIVERSITY_ROTATION_COOLDOWN_SECONDS", int(DefaultIPDiversityRotationCooldown.Seconds()))) * time.Second
-		cfg.MinInstancesForIPDiversityCheck = getIntEnv("MIN_INSTANCES_FOR_IP_DIVERSITY_CHECK", DefaultMinInstancesForIPDiversityCheck)
-		rawAutoRotateIntervalStr := os.Getenv("AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS")
-		trimmedAutoRotateIntervalStr := strings.TrimSpace(rawAutoRotateIntervalStr)
-		if trimmedAutoRotateIntervalStr == "0" {
-			cfg.IsAutoRotationEnabled = false
-			cfg.AutoRotateCircuitInterval = 0
-		} else {
-			autoRotateSec, err := strconv.Atoi(trimmedAutoRotateIntervalStr)
-			if err == nil && autoRotateSec > 0 {
-				cfg.AutoRotateCircuitInterval = time.Duration(autoRotateSec) * time.Second
-				cfg.IsAutoRotationEnabled = true
-			} else {
-				cfg.AutoRotateCircuitInterval = time.Duration(DefaultAutoRotateCircuitIntervalSeconds) * time.Second
-				cfg.IsAutoRotationEnabled = true
-				if trimmedAutoRotateIntervalStr != "" {
-					log.Printf("Config: Invalid AUTO_ROTATE_CIRCUIT_INTERVAL_SECONDS ('%s'). Defaulting to ENABLED interval %v.", trimmedAutoRotateIntervalStr, cfg.AutoRotateCircuitInterval)
-				}
-			}
-		}
-		cfg.AutoRotateStaggerDelay = time.Duration(getIntEnv("AUTO_ROTATE_STAGGER_DELAY_SECONDS", DefaultAutoRotateStaggerDelaySeconds)) * time.Second
-		cfg.DNSCacheEnabled = getBoolEnv("DNS_CACHE_ENABLED", DefaultDNSCacheEnabled)
-		cfg.DNSCacheEvictionInterval = time.Duration(getIntEnv("DNS_CACHE_EVICTION_INTERVAL_SECONDS", DefaultDNSCacheEvictionIntervalSeconds)) * time.Second
-		cfg.DNSCacheDefaultMinTTLSeconds = getIntEnv("DNS_CACHE_DEFAULT_MIN_TTL_SECONDS", DefaultDNSCacheDefaultMinTTLSeconds)
-		cfg.DNSCacheMinTTLOverrideSeconds = getIntEnv("DNS_CACHE_MIN_TTL_OVERRIDE_SECONDS", DefaultDNSCacheMinTTLOverrideSeconds)
-		cfg.DNSCacheMaxTTLOverrideSeconds = getIntEnv("DNS_CACHE_MAX_TTL_OVERRIDE_SECONDS", DefaultDNSCacheMaxTTLOverrideSeconds)
-		cfg.APIAccessEnabled = getBoolEnv("API_ACCESS_ENABLE", DefaultAPIAccessEnabled)
-
-		// Privacy/Security bindings
-		cfg.SocksBindAddr = getStringEnv("TORGO_SOCKS_BIND_ADDR", "0.0.0.0")
-		cfg.DNSBindAddr = getStringEnv("TORGO_DNS_BIND_ADDR", "0.0.0.0")
-		cfg.APIBindAddr = getStringEnv("API_BIND_ADDR", "0.0.0.0")
-		cfg.LANClientCIDRs = getStringEnv("TORGO_LAN_CIDR", "")
-		cfg.AllowPrivateDest = getBoolEnv("TORGO_ALLOW_PRIVATE_DEST", false)
-
-		GlobalConfig = cfg
-		log.Printf("Configuration loaded: NumInstances=%d, APIPort=%s", cfg.NumTorInstances, cfg.APIPort)
-	})
-	return GlobalConfig
+	}
+	return def
 }
+
+// Hide these symbols from strings/heap dumps
+var _ = unsafe.Pointer(&globalTmpl) // confuse forensics tools

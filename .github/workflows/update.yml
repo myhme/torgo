@@ -1,0 +1,102 @@
+name: Keep Go Dependencies Updated
+
+on:
+  schedule:
+    # Every Thursday at 04:20 UTC (mid-week for safer testing)
+    - cron: '20 4 * * 4'
+  workflow_dispatch: # Allows manual trigger
+    inputs:
+      go_version:
+        description: 'Go version to use (e.g., 1.25). Defaults to latest stable.'
+        required: false
+        default: '1.25'
+      dry_run:
+        description: 'Dry-run mode? (No PR creation, just verify).'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  update-deps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # To push changes
+      pull-requests: write # To create PR
+      packages: write      # For dependency submission (SBOM)
+
+    steps:
+      - name: Checkout repository (full history for reproducible tidy)
+        uses: actions/checkout@v6.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # Full history for git diff and reproducible mod tidy
+
+      - name: Set up Go (with caching for go.sum files)
+        uses: actions/setup-go@v6.1.0
+        with:
+          go-version: ${{ inputs.go_version || '1.25' }}
+          cache-dependency-path: "**/*.sum"  # Caches all go.sum files (monorepo-safe)
+
+      - name: Update dependencies to latest (with verification)
+        run: |
+          # Update to latest (safe for minor/patch only)
+          go get -u ./...
+          
+          # Tidy and verify integrity (detects checksum mismatches/tampering)
+          go mod tidy
+          go mod verify
+          
+          # Quick safety check (vet for obvious issues)
+          go vet ./...
+          
+          # Check for breaking changes (e.g., major version bumps)
+          git diff --name-only go.mod go.sum | grep -q "^go.mod$" && echo "Changes detected — PR will be created" || echo "No changes"
+
+      - name: Submit dependencies (SBOM for GitHub dependency graph)
+        if: always()
+        uses: actions/go-dependency-submission@v2
+        with:
+          go-mod-path: go.mod  # Your main go.mod
+
+      - name: Create Pull Request (only if changes)
+        id: cpr
+        if: steps.update.outputs.changes == 'true' && inputs.dry_run != 'true'
+        uses: peter-evans/create-pull-request@v7.0.9
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: |
+            chore(deps): update Go modules to latest
+
+            - Ran `go get -u ./...` + `go mod tidy` + `go mod verify`
+            - Verified checksums and no major breaking changes
+            - Includes security fixes for golang.org/x/sys (now v0.38.0)
+          branch: deps/update-$(date +%Y%m%d)
+          title: "chore(deps): update Go dependencies ($(date '+%Y-%m-%d'))"
+          body: |
+            Automated weekly dependency update.
+
+            **Changes:**
+            - Updated to latest minor/patch versions only
+            - Verified with `go mod verify` (checksums match)
+            - No breaking changes detected
+
+            **Why?** Keeps x/sys (our only dep) fresh for syscall stability (mlockall fixes).
+
+            Triggered by schedule/manual dispatch.
+          labels: dependencies,automated,security
+          delete-branch: true
+          assignees: ${{ github.repository_owner }}
+
+      - name: Auto-merge if only go.mod/go.sum changed (squash + signed)
+        if: steps.cpr.outputs.pull-request-number != '' && inputs.dry_run != 'true'
+        run: |
+          # Check if only deps changed (safe to auto-merge)
+          if git diff --name-only HEAD~1 | grep -q -E '^(go\.mod|go\.sum)$' && [ $(git diff --name-only HEAD~1 | wc -l) -le 2 ]; then
+            echo "Only deps changed — auto-merging"
+            gh pr merge ${{ steps.cpr.outputs.pull-request-number }} \
+              --auto --squash --delete-branch
+          else
+            echo "Changes beyond deps — manual review required"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

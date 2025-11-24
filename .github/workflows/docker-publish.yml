@@ -1,78 +1,139 @@
-name: Docker Publish for Torgo
+# .github/workflows/docker-publish.yml
+name: Docker Publish — Torgo (2025 Final Form)
 
 on:
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
     inputs:
       tags:
-        description: 'Docker tags (e.g., latest, beta, specific version). Defaults to branch name or "latest" for main.'
+        description: 'Extra tags (e.g. prod, v1337). Default = latest on main.'
         required: false
-        default: '' # Will be derived if empty
-
-  # Triggers the workflow on push events for the main and beta branches
+        default: ''
+      dry_run:
+        description: 'Dry-run? (No push, no sign, just build & verify)'
+        type: boolean
+        default: false
   push:
-    branches:
-      - main
-      - beta
-      
+    branches: [ main, beta ]
+    tags: [ 'v*.*.*' ]
   schedule:
-    - cron: '10 5 * * 4'
+    - cron: '30 4 * * 4'  # Thursday 04:30 UTC — weekly freshness + revocation
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write          # for keyless cosign + provenance
+
 jobs:
-  build-and-push-docker-image:
+  build-and-publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read  # To checkout the repository
-      packages: write # To push packages to GitHub Container Registry (GHCR)
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout (full history for reproducible builds)
+        uses: actions/checkout@v6.0.0
+        with:
+          fetch-depth: 0
 
-      # QEMU is used by buildx to emulate ARM on x86 runners
-      - name: Set up QEMU
+      - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
 
-      - name: Set up Docker Buildx
+      - name: Set up Docker Buildx (latest)
         uses: docker/setup-buildx-action@v3
-        # You can create a new builder instance here if needed, e.g.:
-        # id: buildx
-        # with:
-        #   driver-opts: image=moby/buildkit:master
 
-      - name: Log in to GitHub Container Registry
+      - name: Login to GHCR
+        if: github.event.inputs.dry_run != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }} 
-          password: ${{ secrets.GITHUB_TOKEN }}    
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine Docker metadata (tags and labels)
+      - name: Generate metadata (tags + labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/torgo 
+          images: ghcr.io/${{ github.repository_owner }}/torgo
+          flavor: |
+            latest=auto
           tags: |
-            type=ref,event=branch 
+            type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}} 
-            type=sha 
-            type=raw,value=${{ github.event.inputs.tags }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tags != '' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value={{date 'YYYYMMDD'}}-{{sha short}},enable={{is_default_branch}}
+            type=raw,value=${{ inputs.tags }},enable=${{ inputs.tags != '' }}
 
-      - name: Build and push Docker image (multi-platform)
-        uses: docker/build-push-action@v5
+      - name: Build & push (multi-arch + full attestation)
+        id: build
+        uses: docker/build-push-action@v6
         with:
-          context: . 
-          file: ./Dockerfile 
-          platforms: linux/arm64,linux/amd64 # Added platforms
-          push: true 
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event.inputs.dry_run != 'true' }}
+          provenance: true
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Caching can speed up builds (optional)
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # 2025 security flags
+          attestations: |
+            type=sbom
+            type=provenance,mode=max
+          outputs: |
+            type=image,
+            name=ghcr.io/${{ github.repository_owner }}/torgo,
+            push-by-digest=true,
+            push=${{ github.event.inputs.dry_run != 'true' }}
+
+      - name: Export digest list
+        if: github.event.inputs.dry_run != 'true'
+        run: |
+          echo "DIGESTS<<EOF" >> $GITHUB_OUTPUT
+          docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/torgo:${{ github.sha }} \
+            --format '{{json .Manifest.Digests}}' >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        id: digest
+
+      - name: Sign all digests (keyless Cosign — zero secrets)
+        if: github.event.inputs.dry_run != 'true'
+        run: |
+          for digest in $(echo '${{ steps.digest.outputs.DIGESTS }}' | jq -r '.[]'); do
+            echo "Signing $digest"
+            cosign sign --yes "${{ github.repository_owner }}/torgo@$digest" || exit 1
+          done
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      - name: Verify signatures (paranoid final check)
+        if: github.event.inputs.dry_run != 'true'
+        run: |
+          cosign verify \
+            --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/docker-publish.yml@refs/heads/main' \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            ghcr.io/${{ github.repository_owner }}/torgo:${{ github.sha }} | grep -q "Verified OK"
+          echo "All signatures verified OK"
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      - name: Trim old untagged images (keep last 7 + all tagged)
+        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
+        run: |
+          gh extension install github/gh-cli 2>/dev/null || true
+          gh api -X GET "/user/packages/container/torgo/versions?per_page=100" \
+            --jq '.[] | select(.metadata.container.tags | length == 0) | .id' \
+            | tail -n +8 \
+            | xargs -r -I{} gh api -X DELETE "/user/packages/container/torgo/versions/{}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Success banner
+        run: |
+          echo "Torgo image published, signed, verified, and trimmed"
+          echo "Image: ghcr.io/${{ github.repository_owner }}/torgo:${{ github.sha }}"
