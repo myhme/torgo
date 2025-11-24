@@ -4,7 +4,7 @@
 # via docker/metadata-action, not inside the Dockerfile.
 
 # -----------------------------
-# 0) Build args (set in CI or defaults)
+# 0) Build args (global defaults)
 # -----------------------------
 ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.22
@@ -17,6 +17,11 @@ ARG APP_NAME=torgo
 # -----------------------------
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 
+# Re-declare ARGs so they are visible in this stage
+ARG BUILD_USER_UID
+ARG BUILD_USER_GID
+ARG APP_NAME
+
 # Minimal packages needed for building
 RUN apk add --no-cache --virtual .build-deps \
     git \
@@ -26,8 +31,8 @@ RUN apk add --no-cache --virtual .build-deps \
     && mkdir -p /build /cache /tmp/go-cache
 
 # Create dedicated build user (non-root)
-RUN addgroup -S -g ${BUILD_USER_GID} buildergroup \
- && adduser  -S -D -u ${BUILD_USER_UID} -G buildergroup builder \
+RUN addgroup -S -g "${BUILD_USER_GID}" buildergroup \
+ && adduser  -S -D -u "${BUILD_USER_UID}" -G buildergroup builder \
  && chown -R builder:buildergroup /build /cache /tmp/go-cache
 
 # Set environment for reproducible Go builds (cache paths, readonly modules)
@@ -43,7 +48,6 @@ WORKDIR /build
 COPY go.* ./
 
 # Run module download as the non-root build user using BuildKit cache mounts
-# The cache targets must exist and be writable by the build user - we created and chowned them above.
 USER builder
 RUN --mount=type=cache,target=${GOMODCACHE} \
     --mount=type=cache,target=/cache/go-build \
@@ -61,6 +65,9 @@ RUN --mount=type=cache,target=${GOMODCACHE} \
 # -----------------------------
 FROM alpine:${ALPINE_VERSION} AS deps
 
+# Re-declare version ARG so it’s visible here (optional but explicit)
+ARG ALPINE_VERSION
+
 # Keep packages minimal and pinned via ARG; install tor and runtime libs
 RUN apk add --no-cache tor libssl3 libcrypto3 libevent zlib \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
@@ -69,6 +76,9 @@ RUN apk add --no-cache tor libssl3 libcrypto3 libevent zlib \
 # 3) Final stage - scratch (smallest possible)
 # -----------------------------
 FROM scratch AS final
+
+# Re-declare APP_NAME so COPY uses the correct binary name
+ARG APP_NAME
 
 # Basic static label; git-derived labels come from CI (docker/metadata-action)
 LABEL org.opencontainers.image.title="torgo"
@@ -92,7 +102,6 @@ COPY --from=builder /${APP_NAME} /usr/local/bin/${APP_NAME}
 COPY torrc.template /etc/tor/torrc.template
 
 # Use the same uid/gid that Tor expects (if present in /etc/passwd from deps)
-# If tor expects uid 106:112 like in many distros, keep that; else adjust at runtime.
 USER 106:112
 
 # Entrypoint
