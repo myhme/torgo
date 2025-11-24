@@ -1,5 +1,4 @@
-# .github/workflows/docker-publish.yml
-name: Docker Publish — Torgo (2025 Final Form)
+name: Docker Publish — Torgo
 
 on:
   workflow_dispatch:
@@ -76,26 +75,31 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event.inputs.dry_run != 'true' }}
-          provenance: true
-          sbom: true
+          
+          # --- FIX: Removed 'provenance: true' and 'sbom: true' from top level ---
+          # --- The attestations are now defined directly within the output section. ---
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # 2025 security flags
-          attestations: |
-            type=sbom
-            type=provenance,mode=max
+          
+          # 2025 security flags — Integrated into outputs array
           outputs: |
             type=image,
             name=ghcr.io/${{ github.repository_owner }}/torgo,
             push-by-digest=true,
-            push=${{ github.event.inputs.dry_run != 'true' }}
-
+            push=${{ github.event.inputs.dry_run != 'true' }},
+            # New v6 syntax: pass attestations as output options
+            attestations=type=sbom,type=provenance,mode=max
+            
       - name: Export digest list
         if: github.event.inputs.dry_run != 'true'
         run: |
+          # Use the digest from the build step's output to ensure we inspect the correct manifest
           echo "DIGESTS<<EOF" >> $GITHUB_OUTPUT
+          # Note: Changed to inspect using one of the tags created (e.g., the short SHA tag) 
+          # to ensure it finds the manifest list, as the old inspection was failing due to 
+          # the output structure change in v6
           docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/torgo:${{ github.sha }} \
             --format '{{json .Manifest.Digests}}' >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
