@@ -1,8 +1,10 @@
 # --- STAGE 0: BUILDER (Go application) ---
 FROM golang:1.25-alpine AS builder
 # Install build dependencies for Go CGO (musl-dev for static linking)
-USER nobody
+# FIX: Must install dependencies as root (default user) before switching to 'nobody'.
 RUN apk add --no-cache --virtual .build-deps git gcc musl-dev
+
+USER nobody
 WORKDIR /src
 COPY go.* ./
 # Download Go modules
