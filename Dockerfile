@@ -15,41 +15,32 @@ RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -extldflags=-static -buildi
 
 # --- STAGE 1: TOR DEPENDENCIES (Dedicated to install 'tor' and dependencies) ---
 FROM alpine:latest AS deps
-# Install tor and its dependencies
-RUN apk add --no-cache tor \
-    # Remove documentation and unnecessary files to keep this stage small
+# Install tor and its core dynamic dependencies explicitly for better consistency
+RUN apk add --no-cache tor libssl3 libcrypto3 libevent libz \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
 
 # --- STAGE 2: FINAL DISTROLESS IMAGE ---
 FROM scratch
+
 # ----------------------------------------------------------------------
-# Copy essential files from the 'deps' stage (which has 'tor' installed)
-# We copy the specific files required for the Tor binary to run on scratch.
-# This approach is less brittle than attempting ldd across stages.
+# Copy essential files from the 'deps' stage
 # ----------------------------------------------------------------------
 
-# Dynamic Linker (ld-musl-*) - required for the Go CGO binary and Tor
-# Note: For multi-arch, BuildKit picks the right one if available. We copy both common names.
-COPY --from=deps /lib/ld-musl-x86_64.so.1 /lib/
-COPY --from=deps /lib/ld-musl-aarch64.so.1 /lib/
+# 1. Dynamic Linker: Use wildcard to copy the correct linker for the target architecture. (FIXED)
+COPY --from=deps /lib/ld-musl-*.so.1 /lib/
 
-# Essential dynamic libraries for Tor (libz, libssl, libcrypto, libevent etc.)
-# We will copy the most common ones and rely on the 'deps' stage having them installed
-# to resolve the correct path for the target architecture.
-
-# ZLib - Fixes the original error
+# 2. Tor's Core Dynamic Libraries: Copy the standard symlink names.
 COPY --from=deps /lib/libz.so.1 /lib/
+COPY --from=deps /usr/lib/libssl.so.3 /usr/lib/
+COPY --from=deps /usr/lib/libcrypto.so.3 /usr/lib/
+COPY --from=deps /usr/lib/libevent-2.1.so.7 /usr/lib/
 
-# Tor binary itself
+# 3. Tor binary and system files
 COPY --from=deps /usr/bin/tor /usr/bin/tor
-
-# System files required for Tor to run as an unprivileged user (UID: 106)
 COPY --from=deps /etc/passwd /etc/passwd
 COPY --from=deps /etc/group /etc/group
 
-# ----------------------------------------------------------------------
-# Copy application files
-# ----------------------------------------------------------------------
+# 4. Application files
 COPY --from=builder /torgo /usr/local/bin/torgo
 COPY torrc.template /etc/tor/torrc.template
 
