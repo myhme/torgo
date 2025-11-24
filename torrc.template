@@ -1,4 +1,4 @@
-# === CORE HARDENING (mandatory) ===
+# === CORE HARDENING ===
 ClientOnly 1
 AvoidDiskWrites 1
 SafeLogging 1
@@ -11,15 +11,10 @@ VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
-# === ABSOLUTE ISOLATION (non-negotiable) ===
 SocksPort __SOCKSPORT__ IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
 DNSPort __DNSPORT__ AutomapHostsOnResolve 1
-ControlPort __CONTROLPORT__
-CookieAuthentication 1
-CookieAuthFile __DATADIR__/control_auth_cookie
-CookieAuthFileGroupReadable 0
 
-# === CIRCUIT AGGRESSION & FAST ROTATION (55 s circuits) ===
+# Blind instance – no control port, no cookie
 UseEntryGuards 0
 NumEntryGuards 0
 MaxCircuitDirtiness 55
@@ -30,43 +25,30 @@ CircuitStreamTimeout 30
 SocksTimeout 120
 KeepalivePeriod 15
 
-# === GEOGRAPHIC LOCKDOWN (only Tier-1 jurisdictions) ===
 StrictNodes 1
 ExitNodes {us}{ca}{gb}{de}{nl}{no}{se}{fi}{ch}{is}{li}{lu}{dk}{at}{be}{fr}{jp}{au}{nz}
 ExcludeNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{hk}{tr}{il}{sg}{kr}{in}{br}{za}{ae}{qa}{sa}{id}{my}{th}{vn}{pk}{eg}{ma}{co}{ar}{cl}{pe}{bo}
 ExcludeExitNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{hk}{tr}{il}{sg}{kr}{in}{br}{za}{ae}{qa}{sa}
 
-# === NETWORK HARDENING ===
 ClientUseIPv6 0
-ClientPreferIPv6ORPort 0
 EnforceDistinctSubnets 1
 FascistFirewall 1
-ReachableAddresses *:9050-9059,*:9160-9169,*:9200-9299
-FirewallPorts 9050-9299
+ReachableAddresses *:9050-9059,*:9200-9299
 
-# === ANTI-FINGERPRINTING & ANTI-LEAK ===
 DisableAllSwap 1
 HardwareAccel 0
 DisableDebuggerAttachment 1
-DisableNetwork 0
 AllowNonRFC953Hostnames 0
 OptimisticData 0
 ClientRejectInternalAddresses 1
 WarnPlaintextPorts 1,22,25,109,110,143,993,995,6667
 RejectPlaintextPorts 1,22,25,109,110,143,993,995,6667
 
-# === PERFORMANCE (without weakening anonymity) ===
 CircuitPadding 0
-# === ANONYMITY (Default modern padding enabled) ===
-# Since resources are abundant, we enable full padding
-# for Defense-in-Depth against traffic flow analysis.
 ReducedCircuitPadding 1
 ConnectionPadding 0
 FastFirstHopPK 1
 ExtendByEd25519ID 1
 UseMicrodescriptors 1
-FetchDirInfoEarly 1
-FetchDirInfoExtraEarly 1
 
-# === FINAL PLACEHOLDER ===
 __EXTRA_TOR_OPTIONS__

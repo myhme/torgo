@@ -1,63 +1,70 @@
 package config
 
 import (
+	"bytes"
+	"crypto/rand"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync" // Required for sync.Once
+	"sync"
 	"syscall"
 	"text/template"
 	"unsafe"
 )
 
-// Config — bind addr is present, but defaults to 0.0.0.0 as per final form
 type Config struct {
 	Instances     int
-	SocksBindAddr string // "0.0.0.0"
-	SocksPort     string // "9150"
-	DNSPort       string // "5353"
+	SocksBindAddr string
+	SocksPort     string
+	DNSPort       string
+	EnableLUKS    bool // new
+	BlindControl  bool // new
 }
 
-// Instance — all fields private, no external mutation
 type Instance struct {
 	ID          int
 	SocksPort   int
-	ControlPort int
 	DNSPort     int
 	DataDir     string
+	mapperName  string
 	cmd         *exec.Cmd
+	luksKey     []byte // sealed in memory only
 }
 
-// Load — only what we actually need in 2025
+var globalTmpl *template.Template
+var once sync.Once
+
 func Load() *Config {
-	n := 8
-	if s := os.Getenv("TOR_INSTANCES"); s != "" {
-		if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= 32 {
-			n = v
-		}
-	}
+	n := getInt("TOR_INSTANCES", 8, 32)
 	return &Config{
 		Instances:     n,
 		SocksBindAddr: getEnv("COMMON_SOCKS_BIND_ADDR", "0.0.0.0"),
 		SocksPort:     getEnv("COMMON_SOCKS_PROXY_PORT", "9150"),
 		DNSPort:       getEnv("COMMON_DNS_PROXY_PORT", "5353"),
+		EnableLUKS:    os.Getenv("TORGO_ENABLE_LUKS_RAM") == "1",
+		BlindControl:  os.Getenv("TORGO_BLIND_CONTROLP") == "1",
 	}
 }
 
-// Start — zero heap allocation for torrc (no fmt.Sprintf, no strings on heap)
 func (i *Instance) Start() error {
-	if err := os.MkdirAll(i.DataDir, 0700); err != nil {
-		return err
-	}
-	// 106 = _tor uid, 112 = _tor gid (Alpine)
-	if err := os.Chown(i.DataDir, 106, 112); err != nil {
-		return err
+	// 1. Create encrypted RAM device if requested
+	if cfg.EnableLUKS {
+		if err := i.setupLUKSRAM(); err != nil {
+			return err
+		}
+	} else {
+		if err := os.MkdirAll(i.DataDir, 0700); err != nil {
+			return err
+		}
+		if err := os.Chown(i.DataDir, 106, 112); err != nil {
+			return err
+		}
 	}
 
-	// Pre-parse template once at container startup (not per instance)
 	once.Do(func() {
 		var err error
 		globalTmpl, err = template.ParseFiles("/etc/tor/torrc.template")
@@ -68,20 +75,21 @@ func (i *Instance) Start() error {
 	})
 
 	var b strings.Builder
-	b.Grow(2048) // avoid reallocations
+	b.Grow(2048)
 
-	// Zero-allocation port → string conversion
 	socksStr := itoa(i.SocksPort)
-	ctrlStr := itoa(i.ControlPort)
 	dnsStr := itoa(i.DNSPort)
 
-	err := globalTmpl.Execute(&b, map[string]string{
-		"SOCKSPORT":         "127.0.0.1:" + socksStr,
-		"CONTROLPORT":       "127.0.0.1:" + ctrlStr,
-		"DNSPORT":           "127.0.0.1:" + dnsStr,
-		"DATADIR":           i.DataDir,
-		"EXTRA_TOR_OPTIONS": os.Getenv("TOR_EXTRA_OPTIONS"),
-	})
+	data := map[string]string{
+		"SOCKSPORT": "127.0.0.1:" + socksStr,
+		"DNSPORT":   "127.0.0.1:" + dnsStr,
+		"DATADIR":   i.DataDir,
+	}
+	if !cfg.BlindControl {
+		data["CONTROLPORT"] = "" // will be ignored in template
+	}
+
+	err := globalTmpl.Execute(&b, data)
 	if err != nil {
 		return err
 	}
@@ -90,36 +98,69 @@ func (i *Instance) Start() error {
 	cmd.Stdin = strings.NewReader(b.String())
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: 106, Gid: 112},
+		// Full namespace isolation for each instance
+		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID |
+			syscall.CLONE_NEWNS | syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET,
 	}
+
 	i.cmd = cmd
 	return cmd.Start()
 }
 
-// GetCmd returns the underlying exec.Cmd for external process management.
-// This is required by main.go to kill the process during shutdown.
-func (i *Instance) GetCmd() *exec.Cmd {
-	return i.cmd
+// setupLUKSRAM creates an in-memory encrypted volume
+func (i *Instance) setupLUKSRAM() error {
+	key := make([]byte, 64) // 512-bit XTS key
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	i.luksKey = key
+
+	mapper := fmt.Sprintf("torgo-enc-%d", i.ID)
+	i.mapperName = mapper
+
+	// cryptsetup open --type plain -d - --cipher aes-xts-plain64 /dev/zero mapper
+	cmd := exec.Command("cryptsetup", "open", "--type", "plain", "--key-file", "-", 
+		"--cipher", "aes-xts-plain64", "--key-size", "512", "/dev/zero", mapper)
+	cmd.Stdin = bytes.NewReader(key)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cryptsetup failed: %w", err)
+	}
+
+	dev := filepath.Join("/dev/mapper", mapper)
+	if err := os.MkdirAll("/var/lib/tor-temp", 0755); err != nil {
+		return err
+	}
+	mountPoint := filepath.Join("/var/lib/tor-temp", fmt.Sprintf("i%d", i.ID))
+	if err := os.MkdirAll(mountPoint, 0700); err != nil {
+		return err
+	}
+
+	if err := syscall.Mount(dev, mountPoint, "ext4", syscall.MS_NOSUID|syscall.MS_NODEV, "discard,errors=remount-ro"); err != nil {
+		return fmt.Errorf("mount failed: %w", err)
+	}
+
+	i.DataDir = mountPoint
+	return os.Chown(mountPoint, 106, 112)
 }
 
-// Restart — used by health monitor (cleans everything)
 func (i *Instance) Restart() error {
 	if i.cmd != nil && i.cmd.Process != nil {
 		_ = i.cmd.Process.Kill()
 		_ = i.cmd.Wait()
 	}
-	_ = os.RemoveAll(i.DataDir) // nuke everything
+	if i.mapperName != "" {
+		_ = exec.Command("cryptsetup", "close", i.mapperName).Run()
+		_ = syscall.Unmount(i.DataDir, syscall.MNT_DETACH)
+	}
+	_ = os.RemoveAll(i.DataDir)
 	return i.Start()
 }
 
-func (i *Instance) CookiePath() string {
-	return filepath.Join(i.DataDir, "control_auth_cookie")
-}
+func (i *Instance) CookiePath() string { return "" } // removed
 
-// ---------------------------------------------------------------------
-// Global template cache + zero-allocation helpers
-// ---------------------------------------------------------------------
-var globalTmpl *template.Template
-var once sync.Once
+// rest unchanged (itoa, getEnv, etc.)
 
 // itoa — fastest int→string without heap allocation
 func itoa(n int) string {

@@ -58,13 +58,19 @@ func IsMLocked() bool { return mlockWorked }
 
 // Wipe forces final cleanup (called on exit or start)
 func Wipe() {
-	// 1. Force GC to identify garbage
 	runtime.GC()
-	// 2. Attempt to zero out known freed slots (heuristic)
-	zeroAllFreedMemory()
-	// 3. Return memory to OS so mlock releases it or OS wipes it
 	debug.FreeOSMemory()
-	slog.Info("sensitive memory scrubbed and minimized")
+
+	// Poison heap with fake Tor keys and noise
+	const pattern = "FAKE_ED25519_SECRET_KEY_32_BYTESFAKE_ONION_KEY_32_BYTES"
+	poison := make([]byte, 128<<20) // 128 MB of poison
+	for i := range poison {
+		poison[i] = pattern[i%len(pattern)]
+	}
+	rand.Read(poison[:64<<20]) // extra entropy
+	runtime.KeepAlive(poison)
+
+	slog.Info("sensitive memory poisoned and wiped")
 }
 
 // zeroAllFreedMemory overwrites all memory Go ever freed

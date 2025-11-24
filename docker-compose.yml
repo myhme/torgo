@@ -5,13 +5,15 @@ services:
     restart: unless-stopped
     # Use the specific user created in the Dockerfile
     user: "106:106"
+    runtime: firecracker
+    privileged: false
     read_only: true
     # Use host network to simplify network stack and avoid Docker bridge overhead
     # We bind directly to the WireGuard IP in the environment variables
     network_mode: host 
     
     tmpfs:
-      - /var/lib/tor:mode=700,size=256m,noexec,nosuid,nodev
+      - /var/lib/tor-temp:size=512m,mode=700,noexec,nosuid,nodev
       - /run:size=32m,noexec,nosuid,nodev
       - /tmp:size=64m,noexec,nosuid,nodev
     
@@ -21,35 +23,27 @@ services:
       # NET_ADMIN is the most dangerous capability and is LIKELY unnecessary
       # since we only bind ports and don't manage iptables or complex routing.
       - IPC_LOCK # REQUIRED for mlockall to protect sensitive memory
-      
+      - SYS_ADMIN    # needed for mount/unmount of encrypted devices
+      - SYS_CHROOT
+
     security_opt:
       - no-new-privileges:true
-      # MANDATORY: Load the hardened seccomp profile
-      - seccomp:seccomp.json 
-      
-    sysctls:
-      - kernel.core_pattern=|/bin/false
     ulimits:
       memlock: -1 # Required for mlockall to prevent sensitive memory from being swapped
       core: 0
       
     environment:
-      # Use the local host IP or the WireGuard IP if binding to it is mandatory
-      - TORGO_SOCKS_BIND_ADDR=10.8.0.50
-      - TORGO_DNS_BIND_ADDR=10.8.0.50
-      # ... other environment variables
       - SECMEM_REQUIRE_MLOCK=true
-      - TOR_INSTANCES=6
+      - TOR_INSTANCES=8
+      - TORGO_ENABLE_LUKS_RAM=1
+      - TORGO_BLIND_CONTROLP=1
       - COMMON_SOCKS_PROXY_PORT=9150
       - COMMON_DNS_PROXY_PORT=5353
-      # TOR_EXTRA_OPTIONS from the original is fine, but it's redundant with torrc.template
-      
-    # Healthcheck remains the same but needs to use the host network bindings
+
     healthcheck:
-      test: ["CMD", "sh", "-c", "nc -z -w 2 10.8.0.50 9150 || exit 1"]
+      test: ["CMD", "sh", "-c", "timeout 3 bash -c '</dev/tcp/127.0.0.1/9150'"]
       interval: 30s
       timeout: 5s
-      retries: 3
-      start_period: 40s
+      retries: 5
 
     # Removed the 'networks' block as we are using 'network_mode: host'

@@ -1,19 +1,16 @@
 # Optimized multi-arch Dockerfile for torgo (Go + Tor)
 # Goals: multi-arch (linux/amd64,linux/arm64), BuildKit cache mounts, small final image (scratch),
-# hardened/least-privilege final image, reproducible build-friendly labels. Use BuildKit cache mounts
-# for GOMODCACHE and Go build cache. Buildx should be invoked with --attest / SBOM flags to produce
-# provenance and SBOM (those CLI flags are provided in the CI pipeline / build command).
+# hardened/least-privilege final image. Git-based metadata (dates, commit, refs) is handled by CI
+# via docker/metadata-action, not inside the Dockerfile.
 
 # -----------------------------
-# 0) Build args (set in CI) -- helps reproducibility
+# 0) Build args (set in CI or defaults)
 # -----------------------------
 ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.22
 ARG BUILD_USER_UID=1001
 ARG BUILD_USER_GID=1001
 ARG APP_NAME=torgo
-ARG BUILD_DATE=unspecified
-ARG VCS_REF=unspecified
 
 # -----------------------------
 # 1) Builder stage (multi-arch)
@@ -33,8 +30,7 @@ RUN addgroup -S -g ${BUILD_USER_GID} buildergroup \
  && adduser  -S -D -u ${BUILD_USER_UID} -G buildergroup builder \
  && chown -R builder:buildergroup /build /cache /tmp/go-cache
 
-
-# Set environment for reproducible Go builds
+# Set environment for reproducible Go builds (cache paths, readonly modules)
 ENV CGO_ENABLED=1 \
     GOCACHE=/cache/go-build \
     GOMODCACHE=/tmp/go-cache \
@@ -69,18 +65,13 @@ FROM alpine:${ALPINE_VERSION} AS deps
 RUN apk add --no-cache tor libssl3 libcrypto3 libevent zlib \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
 
-# Expose the minimal set of files we need in the final scratch image
-# We will copy the shared libs & tor binary into the scratch image
-
 # -----------------------------
 # 3) Final stage - scratch (smallest possible)
 # -----------------------------
 FROM scratch AS final
 
-# Labels (best-effort — CI/buildx can overwrite with --label)
-LABEL org.opencontainers.image.title="${APP_NAME}" \
-      org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.revision="${VCS_REF}"
+# Basic static label; git-derived labels come from CI (docker/metadata-action)
+LABEL org.opencontainers.image.title="torgo"
 
 # Copy musl loader and required shared libs
 COPY --from=deps /lib/ld-musl-*.so.1 /lib/
@@ -100,37 +91,11 @@ COPY --from=builder /${APP_NAME} /usr/local/bin/${APP_NAME}
 # Copy tor configuration template (must be provided in repo)
 COPY torrc.template /etc/tor/torrc.template
 
-# Use the same uid/gid that tor expects (if present in /etc/passwd from deps)
-# If tor expects uid 106:112 like in many distros, keep that; else fallback to nobody
+# Use the same uid/gid that Tor expects (if present in /etc/passwd from deps)
+# If tor expects uid 106:112 like in many distros, keep that; else adjust at runtime.
 USER 106:112
 
-# Minimal seccomp & capabilities: final image is scratch, runtime should drop capabilities in service config
 # Entrypoint
 ENTRYPOINT ["/usr/local/bin/torgo"]
-
-# -----------------------------
-# Notes for CI / buildx invocation (example)
-# -----------------------------
-# Example buildx command (from your CI) to produce multi-arch image + SBOM + provenance:
-#
-# docker buildx build \
-#   --platform linux/amd64,linux/arm64 \
-#   --file Dockerfile \
-#   --tag ghcr.io/<org>/torgo:latest \
-#   --output type=image,push=true \
-#   --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
-#   --build-arg VCS_REF=$(git rev-parse --short HEAD) \
-#   --provenance-mode=max \
-#   --attest type=sbom,mode=max \
-#   --attest type=provenance,mode=max \
-#   .
-#
-# Security hardening recommendations (CI/runtime):
-# - Run container with user namespace remapping where possible.
-# - Use seccomp and AppArmor profiles in the runtime (pod/container runtime config).
-# - Run container with --read-only and mount writable dirs (logs, state) explicitly.
-# - Limit capabilities (don't use --cap-add unless required). Use --cap-drop ALL and add minimal if needed.
-# - Use image signing (cosign) and verification in your deployment pipeline.
-# - Ensure torrc.template does not contain secrets; mount sensitive keys at runtime via secrets manager.
 
 # End of Dockerfile

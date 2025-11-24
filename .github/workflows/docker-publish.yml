@@ -30,9 +30,11 @@ permissions:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    env:
+      IMAGE_REF: ghcr.io/${{ github.repository }}
     steps:
       - name: Checkout (full history for reproducible builds)
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -43,7 +45,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
-        if: github.event.inputs.dry_run != 'true'
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -54,7 +56,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/torgo
+          images: ${{ env.IMAGE_REF }}
           flavor: |
             latest=auto
           tags: |
@@ -65,68 +67,57 @@ jobs:
             type=sha,format=short
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value={{date 'YYYYMMDD'}}-{{sha short}},enable={{is_default_branch}}
-            type=raw,value=${{ inputs.tags }},enable=${{ inputs.tags != '' }}
+            type=raw,value=${{ github.event.inputs.tags }},enable=${{ github.event.inputs.tags != '' }}
 
-      - name: Build & push (multi-arch + full attestation)
+      - name: Build & push (multi-arch + SBOM + provenance)
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event.inputs.dry_run != 'true' }}
+          push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          
-          # FIX 1: Simplify outputs by removing attestation configuration from here.
-          # We only need the image name/tagging configuration.
-          outputs: |
-            type=image,name=ghcr.io/${{ github.repository_owner }}/torgo,push-by-digest=true,push=${{ github.event.inputs.dry_run != 'true' }}
-            
-          # FIX 2: Use the dedicated 'attests' input which is cleaner for V6.
           attests: |
             type=sbom,mode=max
             type=provenance,mode=max
-            
-      - name: Export digest list
-        if: github.event.inputs.dry_run != 'true'
-        run: |
-          # Use the digest from the build step's output to ensure we inspect the correct manifest
-          echo "DIGESTS<<EOF" >> $GITHUB_OUTPUT
-          # Note: Changed to inspect using one of the tags created (e.g., the short SHA tag) 
-          # to ensure it finds the manifest list.
-          docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/torgo:${{ github.sha }} \
-            --format '{{json .Manifest.Digests}}' >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-        id: digest
 
-      - name: Sign all digests (keyless Cosign — zero secrets)
-        if: github.event.inputs.dry_run != 'true'
+      - name: Fail if no digest (safety)
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
         run: |
-          for digest in $(echo '${{ steps.digest.outputs.DIGESTS }}' | jq -r '.[]'); do
-            echo "Signing $digest"
-            cosign sign --yes "${{ github.repository_owner }}/torgo@$digest" || exit 1
-          done
+          if [ -z "${{ steps.build.outputs.digest }}" ]; then
+            echo "ERROR: build did not produce a manifest digest" >&2
+            exit 1
+          fi
+
+      - name: Sign manifest list (keyless Cosign — zero secrets)
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
         env:
           COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          DIGEST=${{ steps.build.outputs.digest }}
+          echo "Signing manifest: ${DIGEST}"
+          cosign sign --yes "${IMAGE_REF}@${DIGEST}"
 
       - name: Verify signatures (paranoid final check)
-        if: github.event.inputs.dry_run != 'true'
-        run: |
-          cosign verify \
-            --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/docker-publish.yml@refs/heads/main' \
-            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-            ghcr.io/${{ github.repository_owner }}/torgo:${{ github.sha }} | grep -q "Verified OK"
-          echo "All signatures verified OK"
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
         env:
           COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          DIGEST=${{ steps.build.outputs.digest }}
+          # Optional: tighten identity-matching if you want to bind to this workflow/ref
+          cosign verify "${IMAGE_REF}@${DIGEST}" | grep -q "Verified OK"
+          echo "All signatures verified OK for ${IMAGE_REF}@${DIGEST}"
 
       - name: Trim old untagged images (keep last 7 + all tagged)
-        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
+        if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true')
         run: |
-          gh extension install github/gh-cli 2>/dev/null || true
+          # Keep only the 7 most recent untagged versions for this package
           gh api -X GET "/user/packages/container/torgo/versions?per_page=100" \
             --jq '.[] | select(.metadata.container.tags | length == 0) | .id' \
             | tail -n +8 \
@@ -136,5 +127,10 @@ jobs:
 
       - name: Success banner
         run: |
-          echo "Torgo image published, signed, verified, and trimmed"
-          echo "Image: ghcr.io/${{ github.repository_owner }}/torgo:${{ github.sha }}"
+          echo "Torgo image built"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "Dry-run mode: no push, no signing."
+          else
+            echo "Image pushed, signed, and verified"
+            echo "Manifest digest: ${{ env.IMAGE_REF }}@${{ steps.build.outputs.digest }}"
+          fi
