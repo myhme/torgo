@@ -13,20 +13,28 @@ import (
 	"torgo/internal/config"
 )
 
-// Hard limits — DNS is extremely lightweight, but we still cap it
-const (
-	maxDNSConns       = 256
-	maxConnsPerInst   = 64
-	dnsConnTimeout    = 30 * time.Second
+// Hard limits — now tunable via config/env
+var (
+	dnsMaxConns       uint32 = 256
+	dnsMaxPerInstance uint32 = 64
+	dnsConnTimeout           = 30 * time.Second
 )
 
 // Atomic counters (lock-free)
 var (
-	totalDNSConns     uint32
-	perInstDNSConns   [32]uint32 // up to 32 instances
+	totalDNSConns   uint32
+	perInstDNSConns [32]uint32 // up to 32 instances
 )
 
 func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
+	// Pull DNS tunables from config
+	if cfg.DNSMaxConns > 0 {
+		dnsMaxConns = uint32(cfg.DNSMaxConns)
+	}
+	if cfg.DNSMaxConnsPerInst > 0 {
+		dnsMaxPerInstance = uint32(cfg.DNSMaxConnsPerInst)
+	}
+
 	addr := net.JoinHostPort("0.0.0.0", cfg.DNSPort)
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -34,15 +42,19 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		return
 	}
 	defer l.Close()
-	slog.Info("DNS-over-TCP proxy active", "addr", l.Addr())
+	slog.Info("DNS-over-TCP proxy active",
+		"addr", l.Addr(),
+		"maxDNSConns", dnsMaxConns,
+		"maxPerInstance", dnsMaxPerInstance,
+	)
 
 	for {
 		c, err := l.Accept()
 		if err != nil {
 			return
 		}
-		if atomic.LoadUint32(&totalDNSConns) >= maxDNSConns {
-			c.Close()
+		if atomic.LoadUint32(&totalDNSConns) >= dnsMaxConns {
+			_ = c.Close()
 			continue
 		}
 		atomic.AddUint32(&totalDNSConns, 1)
@@ -54,30 +66,45 @@ func handleDNS(client net.Conn, insts []*config.Instance) {
 	defer client.Close()
 	defer atomic.AddUint32(&totalDNSConns, ^uint32(0))
 
-	// DNS queries must complete fast
 	client.SetDeadline(time.Now().Add(dnsConnTimeout))
 
-	// Random + fair per-instance selection with back-off
-	var chosen *config.Instance
-	instLen := big.NewInt(int64(len(insts)))
-
-	for attempt := 0; attempt < 10; attempt++ {
-		// Use crypto/rand for non-predictable instance selection
-		randIdx, _ := rand.Int(rand.Reader, instLen)
-		idx := randIdx.Int64()
-		
-		inst := insts[idx]
-		if atomic.LoadUint32(&perInstDNSConns[idx]) < maxConnsPerInst {
-			atomic.AddUint32(&perInstDNSConns[idx], 1)
-			chosen = inst
-			break
-		}
-		time.Sleep(1 * time.Millisecond)
+	instCount := len(insts)
+	if instCount == 0 {
+		return
 	}
-	if chosen == nil {
+	instLen := big.NewInt(int64(instCount))
+
+	// Smart LB: random start + least-connections
+	randIdx, _ := rand.Int(rand.Reader, instLen)
+	start := int(randIdx.Int64())
+
+	var chosen *config.Instance
+	chosenIdx := -1
+	bestLoad := ^uint32(0)
+
+	for offset := 0; offset < instCount; offset++ {
+		idx := (start + offset) % instCount
+		load := atomic.LoadUint32(&perInstDNSConns[idx])
+		if load >= dnsMaxPerInstance {
+			continue
+		}
+		if load < bestLoad {
+			bestLoad = load
+			chosenIdx = idx
+		}
+	}
+
+	if chosenIdx < 0 {
 		return // all instances busy
 	}
-	defer atomic.AddUint32(&perInstDNSConns[chosen.ID-1], ^uint32(0))
+
+	if atomic.AddUint32(&perInstDNSConns[chosenIdx], 1) > dnsMaxPerInstance {
+		atomic.AddUint32(&perInstDNSConns[chosenIdx], ^uint32(0))
+		return
+	}
+	defer atomic.AddUint32(&perInstDNSConns[chosenIdx], ^uint32(0))
+
+	chosen = insts[chosenIdx]
 
 	// Zero-allocation target address (no "127.0.0.1:XXXX" on heap)
 	target := [16]byte{}

@@ -23,6 +23,16 @@ type Config struct {
 	DNSPort       string
 	EnableLUKS    bool // Per-instance RAM encryption for zero-trust
 	BlindControl  bool // No control ports/cookies – blinded isolation
+
+	// New: tunable concurrency & rotation limits
+	MaxConnsPerInstance int
+	MaxTotalConns       int
+	RotateAfterConns    int
+	RotateAfterSeconds  int
+
+	// New: DNS concurrency limits
+	DNSMaxConns        int
+	DNSMaxConnsPerInst int
 }
 
 type Instance struct {
@@ -43,6 +53,7 @@ var (
 
 func Load() *Config {
 	n := getInt("TOR_INSTANCES", 8, 32)
+
 	cfg = &Config{
 		Instances:     n,
 		SocksBindAddr: getEnv("COMMON_SOCKS_BIND_ADDR", "0.0.0.0"),
@@ -50,8 +61,29 @@ func Load() *Config {
 		DNSPort:       getEnv("COMMON_DNS_PROXY_PORT", "5353"),
 		EnableLUKS:    os.Getenv("TORGO_ENABLE_LUKS_RAM") == "1",
 		BlindControl:  os.Getenv("TORGO_BLIND_CONTROLP") == "1",
+
+		// Reasonable defaults with conservative hard caps
+		MaxConnsPerInstance: getInt("TORGO_MAX_CONNS_PER_INSTANCE", 64, 4096),
+		MaxTotalConns:       getInt("TORGO_MAX_TOTAL_CONNS", 512, 65535),
+		RotateAfterConns:    getInt("TORGO_ROTATE_CONNS", 64, 1_000_000),
+		RotateAfterSeconds:  getInt("TORGO_ROTATE_SECS", 900, 86_400), // 15 min → 24h max
+
+		DNSMaxConns:        getInt("TORGO_DNS_MAX_CONNS", 256, 4096),
+		DNSMaxConnsPerInst: getInt("TORGO_DNS_MAX_PER_INST", 64, 1024),
 	}
-	slog.Info("zero-trust config loaded", "instances", cfg.Instances, "luks", cfg.EnableLUKS, "blind", cfg.BlindControl)
+
+	slog.Info("zero-trust config loaded",
+		"instances", cfg.Instances,
+		"luks", cfg.EnableLUKS,
+		"blind", cfg.BlindControl,
+		"maxConnsPerInstance", cfg.MaxConnsPerInstance,
+		"maxTotalConns", cfg.MaxTotalConns,
+		"rotateAfterConns", cfg.RotateAfterConns,
+		"rotateAfterSeconds", cfg.RotateAfterSeconds,
+		"dnsMaxConns", cfg.DNSMaxConns,
+		"dnsMaxConnsPerInst", cfg.DNSMaxConnsPerInst,
+	)
+
 	return cfg
 }
 
@@ -93,7 +125,6 @@ func (i *Instance) Start() error {
 		"SOCKSPORT": "127.0.0.1:" + socksStr,
 		"DNSPORT":   "127.0.0.1:" + dnsStr,
 		"DATADIR":   i.DataDir,
-		// Blinded: No CONTROLPORT – ignored in template
 	}
 	if err := globalTmpl.Execute(&b, data); err != nil {
 		return fmt.Errorf("template exec failed: %w", err)
@@ -115,7 +146,6 @@ func (i *Instance) Start() error {
 		GidMappings: []syscall.SysProcIDMap{
 			{ContainerID: 0, HostID: 112, Size: 1},
 		},
-		// Ambient caps drop
 		AmbientCaps: []uintptr{},
 	}
 

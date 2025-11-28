@@ -13,29 +13,41 @@ import (
 	"torgo/internal/config"
 )
 
-// Global limits — tuned for minimal perf hit but strong isolation
-const (
-	maxConnsPerInstance = 64              // concurrent conns per Tor instance
-	maxTotalConns       = 512             // total SOCKS conns across all instances
-	connTimeout         = 15 * time.Minute
-
-	// Rotation policy: rotate each instance after N connections OR T seconds
-	rotateAfterConns   = 64              // e.g. 64 connections per instance
-	rotateAfterSeconds = 900             // 15 minutes lifetime cap
-)
-
 // Runtime counters (atomic, no mutex)
 var (
-	totalConns            uint32
-	instanceConns         [32]uint32 // current active conns per instance
-	instanceTotal         [32]uint64 // total conns served since last rotation
-	instanceDraining      [32]uint32 // 1 = draining (no new conns), 0 = normal
-	instanceLastRestart   [32]int64  // unix timestamp of last restart
+	totalConns          uint32
+	instanceConns       [32]uint32 // current active conns per instance
+	instanceTotal       [32]uint64 // total conns served since last rotation
+	instanceDraining    [32]uint32 // 1 = draining (no new conns), 0 = normal
+	instanceLastRestart [32]int64  // unix timestamp of last restart
+)
+
+// Env-tunable limits (set in Start from cfg)
+var (
+	maxConnsPerInstance int32 = 64
+	maxTotalConns       int32 = 512
+	rotateAfterConns    uint64 = 64
+	rotateAfterSeconds  int64  = 900
+	connTimeout                = 15 * time.Minute
 )
 
 // Start listens on the public SOCKS address and dispatches connections
 // across Tor instances with per-instance limits and rotation.
 func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
+	// Pull tunables from config
+	if cfg.MaxConnsPerInstance > 0 {
+		maxConnsPerInstance = int32(cfg.MaxConnsPerInstance)
+	}
+	if cfg.MaxTotalConns > 0 {
+		maxTotalConns = int32(cfg.MaxTotalConns)
+	}
+	if cfg.RotateAfterConns > 0 {
+		rotateAfterConns = uint64(cfg.RotateAfterConns)
+	}
+	if cfg.RotateAfterSeconds > 0 {
+		rotateAfterSeconds = int64(cfg.RotateAfterSeconds)
+	}
+
 	addr := net.JoinHostPort(cfg.SocksBindAddr, cfg.SocksPort)
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -43,7 +55,13 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		return
 	}
 	defer l.Close()
-	slog.Info("SOCKS proxy active", "addr", l.Addr())
+	slog.Info("SOCKS proxy active",
+		"addr", l.Addr(),
+		"maxConnsPerInstance", maxConnsPerInstance,
+		"maxTotalConns", maxTotalConns,
+		"rotateAfterConns", rotateAfterConns,
+		"rotateAfterSeconds", rotateAfterSeconds,
+	)
 
 	// Initialize lastRestart timestamps
 	now := time.Now().Unix()
@@ -59,7 +77,7 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		if err != nil {
 			return
 		}
-		if atomic.LoadUint32(&totalConns) >= maxTotalConns {
+		if atomic.LoadUint32(&totalConns) >= uint32(maxTotalConns) {
 			_ = c.Close()
 			continue
 		}
@@ -72,49 +90,57 @@ func handleSOCKS(client net.Conn, insts []*config.Instance) {
 	defer client.Close()
 	defer atomic.AddUint32(&totalConns, ^uint32(0))
 
-	// Enforce idle timeout
 	_ = client.SetDeadline(time.Now().Add(connTimeout))
+
+	instCount := len(insts)
+	if instCount == 0 {
+		return
+	}
+	instLen := big.NewInt(int64(instCount))
+
+	// Smart LB: pick a random starting instance, then choose the one with
+	// the fewest active connections that is not draining and under limit.
+	randIdx, _ := rand.Int(rand.Reader, instLen)
+	start := int(randIdx.Int64())
 
 	var chosen *config.Instance
 	chosenIdx := -1
-	instLen := big.NewInt(int64(len(insts)))
+	bestLoad := ^uint32(0) // max uint32
 
-	// Randomly pick an instance that is:
-	//  - not draining for rotation
-	//  - below maxConnsPerInstance
-	for i := 0; i < 16; i++ { // retry up to 16 times
-		randIdx, _ := rand.Int(rand.Reader, instLen)
-		idx := int(randIdx.Int64())
+	for offset := 0; offset < instCount; offset++ {
+		idx := (start + offset) % instCount
 
-		// Skip instances that are draining for rotation
+		// Skip draining instances
 		if atomic.LoadUint32(&instanceDraining[idx]) == 1 {
 			continue
 		}
 
-		// Check per-instance connection limit
-		if atomic.LoadUint32(&instanceConns[idx]) >= maxConnsPerInstance {
+		load := atomic.LoadUint32(&instanceConns[idx])
+		if load >= uint32(maxConnsPerInstance) {
 			continue
 		}
 
-		// Reserve one slot atomically
-		if atomic.AddUint32(&instanceConns[idx], 1) <= maxConnsPerInstance {
-			chosen = insts[idx]
+		if load < bestLoad {
+			bestLoad = load
 			chosenIdx = idx
-			atomic.AddUint64(&instanceTotal[idx], 1)
-			break
-		} else {
-			// Someone raced us; undo and retry
-			atomic.AddUint32(&instanceConns[idx], ^uint32(0))
 		}
-
-		time.Sleep(1 * time.Millisecond)
 	}
 
-	if chosen == nil || chosenIdx < 0 {
+	if chosenIdx < 0 {
 		// All instances busy or draining
 		return
 	}
+
+	// Reserve a slot
+	if atomic.AddUint32(&instanceConns[chosenIdx], 1) > uint32(maxConnsPerInstance) {
+		// Raced; undo and give up
+		atomic.AddUint32(&instanceConns[chosenIdx], ^uint32(0))
+		return
+	}
 	defer atomic.AddUint32(&instanceConns[chosenIdx], ^uint32(0))
+
+	chosen = insts[chosenIdx]
+	atomic.AddUint64(&instanceTotal[chosenIdx], 1)
 
 	// Build "127.0.0.1:PORT" without heap churn
 	target := [16]byte{}

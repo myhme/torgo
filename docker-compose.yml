@@ -54,6 +54,15 @@ services:
       COMMON_SOCKS_PROXY_PORT: "9150"
       COMMON_DNS_PROXY_PORT: "5353"
 
+      # Rotation / concurrency
+      TORGO_MAX_CONNS_PER_INSTANCE: 64
+      TORGO_MAX_TOTAL_CONNS: 512
+      TORGO_ROTATE_CONNS: 64
+      TORGO_ROTATE_SECS: 900
+
+      # DNS concurrency 
+      TORGO_DNS_MAX_CONNS: 256
+      TORGO_DNS_MAX_PER_INST: 64
     healthcheck:
       test: ["CMD", "sh", "-c", "timeout 3 bash -c '</dev/tcp/127.0.0.1/9150'"]
       interval: 30s
