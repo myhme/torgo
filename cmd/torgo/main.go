@@ -1,11 +1,10 @@
 // cmd/torgo/main.go — FINAL 2025 ZERO-TRUST EDITION
-// This is the end. Nothing more exists to harden.
-// This is the end. Nothing more exists to harden.
 package main
 
 import (
 	"context"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,11 +26,11 @@ func main() {
 	}
 	defer secmem.Wipe()
 
-    // 1.5 Runtime environment self-check (caps, tracing, uid/gid)
-    if err := selfcheck.Enforce(); err != nil {
-        slog.Error("environment self-check failed", "err", err)
-        os.Exit(1)
-    }
+	// 1.5 Runtime environment self-check (caps, tracing, uid/gid)
+	if err := selfcheck.Enforce(); err != nil {
+		slog.Error("environment self-check failed", "err", err)
+		os.Exit(1)
+	}
 
 	if os.Getenv("SECMEM_REQUIRE_MLOCK") == "true" && !secmem.IsMLocked() {
 		slog.Error("mlockall failed — refusing to run on hostile host")
@@ -46,17 +45,22 @@ func main() {
 	waitForTorReady(instances)
 
 	// 3. Graceful shutdown context
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, cancel := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGHUP,
+	)
 	defer cancel()
 
-	// 4. Start services (all are self-healing and DoS-proof)
+	// 4. Start services (all are self-healing and DoS-resistant)
 	go socks.Start(ctx, instances, cfg)
 	go dns.Start(ctx, instances, cfg)
 	go health.Monitor(ctx, instances)
 
 	slog.Info("torgo active — SOCKS 9150 | DNS 5353 — memory locked and non-dumpable")
 
-	// 5. Block forever — this is the final state
+	// 5. Block until shutdown signal
 	<-ctx.Done()
 
 	// 6. Clean shutdown
@@ -68,11 +72,10 @@ func startTorInstances(cfg *config.Config) []*config.Instance {
 	var insts []*config.Instance
 	for i := 1; i <= cfg.Instances; i++ {
 		inst := &config.Instance{
-			ID:          i,
-			SocksPort:   9050 + i,
-			ControlPort: 9160 + i,
-			DNSPort:     9200 + i,
-			DataDir:     "/var/lib/tor/i" + itoaQuick(i), // zero heap
+			ID:        i,
+			SocksPort: 9050 + i,
+			DNSPort:   9200 + i,
+			// DataDir is set inside Instance.Start() based on ID
 		}
 		if err := inst.Start(); err != nil {
 			slog.Error("tor failed to start", "id", i, "err", err)
@@ -92,10 +95,13 @@ func waitForTorReady(insts []*config.Instance) {
 	for time.Now().Before(deadline) {
 		ready := true
 		for _, inst := range insts {
-			if _, err := os.Stat(inst.CookiePath()); err != nil {
+			addr := "127.0.0.1:" + itoaQuick(inst.SocksPort)
+			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+			if err != nil {
 				ready = false
 				break
 			}
+			_ = conn.Close()
 		}
 		if ready {
 			slog.Info("all tor instances ready", "count", len(insts))
@@ -109,20 +115,7 @@ func waitForTorReady(insts []*config.Instance) {
 
 func killAllTor(insts []*config.Instance) {
 	for _, inst := range insts {
-		// Use GetCmd() to access the internal exec.Cmd
-		cmd := inst.GetCmd()
-		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-		}
-	}
-	// Give Tor 5 seconds to exit gracefully
-	time.Sleep(5 * time.Second)
-	for _, inst := range insts {
-		// Use GetCmd() to access the internal exec.Cmd
-		cmd := inst.GetCmd()
-		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		inst.Close()
 	}
 }
 

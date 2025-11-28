@@ -3,8 +3,9 @@ package health
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-	"os"
+	"net"
 	"sync/atomic"
 	"time"
 
@@ -37,18 +38,21 @@ func Monitor(ctx context.Context, insts []*config.Instance) {
 			return
 		case <-ticker.C:
 			for idx, inst := range insts {
-				checkAndHeal(ctx, inst, idx)
+				checkAndHeal(inst, idx)
 			}
 		}
 	}
 }
 
-func checkAndHeal(ctx context.Context, inst *config.Instance, idx int) {
+func checkAndHeal(inst *config.Instance, idx int) {
 	state := states[idx]
 
-	// Fast path — already healthy and recent cookie
+	// Fast path: try quick TCP dial to instance's SOCKS port
 	if atomic.LoadUint32(&state.healthy) == 1 {
-		if fi, err := os.Stat(inst.CookiePath()); err == nil && time.Since(fi.ModTime()) < 90*time.Second {
+		addr := fmt.Sprintf("127.0.0.1:%d", inst.SocksPort)
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err == nil {
+			_ = conn.Close()
 			state.lastSeen = time.Now()
 			return
 		}

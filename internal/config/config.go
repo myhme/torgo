@@ -26,13 +26,13 @@ type Config struct {
 }
 
 type Instance struct {
-	ID          int
-	SocksPort   int
-	DNSPort     int
-	DataDir     string
-	mapperName  string
-	cmd         *exec.Cmd
-	luksKey     []byte // mlocked & poisoned – never leaks
+	ID         int
+	SocksPort  int
+	DNSPort    int
+	DataDir    string
+	mapperName string
+	cmd        *exec.Cmd
+	luksKey    []byte // mlocked & poisoned – never leaks
 }
 
 var (
@@ -115,7 +115,7 @@ func (i *Instance) Start() error {
 		GidMappings: []syscall.SysProcIDMap{
 			{ContainerID: 0, HostID: 112, Size: 1},
 		},
-		// Ambient caps drop (gVisor/enforce no-new-privs)
+		// Ambient caps drop
 		AmbientCaps: []uintptr{},
 	}
 
@@ -169,18 +169,24 @@ func (i *Instance) setupLUKSRAM() error {
 	return os.Chown(mountPoint, 106, 112)
 }
 
-func (i *Instance) Restart() error {
+// Close stops the Tor process and tears down any encrypted mount.
+func (i *Instance) Close() {
 	if i.cmd != nil && i.cmd.Process != nil {
 		_ = i.cmd.Process.Signal(syscall.SIGTERM)
 		_ = i.cmd.Wait()
 	}
 	if i.mapperName != "" {
 		_ = exec.Command("cryptsetup", "close", i.mapperName).Run()
-		if i.DataDir != "" {
-			_ = syscall.Unmount(i.DataDir, syscall.MNT_DETACH)
-		}
 	}
-	_ = os.RemoveAll(i.DataDir) // tmpfs/LUKS auto-wipe
+	if i.DataDir != "" {
+		_ = syscall.Unmount(i.DataDir, syscall.MNT_DETACH)
+		_ = os.RemoveAll(i.DataDir) // tmpfs/LUKS auto-wipe
+	}
+}
+
+// Restart cleanly tears down the instance and starts it again.
+func (i *Instance) Restart() error {
+	i.Close()
 	return i.Start()
 }
 

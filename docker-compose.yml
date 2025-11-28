@@ -1,41 +1,67 @@
+version: "3.9"
+
 services:
-  torgo-gvisor:
-    image: torgo-gvisor:latest  # Build with updated Dockerfile
+  torgo:
+    build: .
     container_name: torgo-zt
-    runtime: runsc  # gVisor syscall trap – host-proof
     restart: unless-stopped
-    user: "1000:1000"  # Rootless: Your host UID/GID
+
+    # Run as tor user (matches /etc/passwd from Alpine tor)
+    user: "106:112"
+
+    privileged: false
     read_only: true
+    network_mode: host
+
+    # All writable paths are tmpfs → RAM only
     tmpfs:
-      - /var/lib/tor-temp:size=1g,mode=700,noexec,nosuid,nodev  # LUKS headroom (x8=8GB)
-      - /run:size=64m,noexec,nosuid,nodev
-      - /tmp:size=128m,noexec,nosuid,nodev
-    cap_drop: [ALL]
+      - /var/lib/tor-temp:size=512m,mode=700,noexec,nosuid,nodev
+      - /var/lib/tor:size=256m,mode=700,noexec,nosuid,nodev
+      - /run:size=32m,noexec,nosuid,nodev
+      - /tmp:size=64m,noexec,nosuid,nodev
+
+    volumes:
+      - ./torrc.template:/etc/tor/torrc.template:ro
+      - ./seccomp.json:/etc/torgo/seccomp.json:ro
+
+    ports:
+      - "9150:9150/tcp"   # SOCKS
+      - "5353:5353/udp"   # DNS
+
+    cap_drop:
+      - ALL
     cap_add:
-      - IPC_LOCK  # mlock keys
-      - SYS_ADMIN  # LUKS (gVisor traps abuse)
-      - SYS_CHROOT
+      - IPC_LOCK    # secmem: mlockall
+      - SYS_ADMIN   # cryptsetup + mount/umount for LUKS RAM
+      - SYS_CHROOT  # some cryptsetup paths
+
     security_opt:
       - no-new-privileges:true
-      - seccomp=unconfined  # gVisor owns filtering – kills exploits
+      - seccomp=/etc/torgo/seccomp.json
+      - apparmor=docker-tor-hardened
+
     ulimits:
       memlock: -1
       core: 0
-      nofile: 1024  # Low for DoS-proof
+
     environment:
-      - SECMEM_REQUIRE_MLOCK=true
-      - SECMEM_STRICT=1  # Fatal on hardening fails
-      - TOR_INSTANCES=8
-      - TORGO_ENABLE_LUKS_RAM=1  # Per-inst encryption
-      - TORGO_BLIND_CONTROLP=1    # No cookies/ports
-      - COMMON_SOCKS_PROXY_PORT=9150
-      - COMMON_DNS_PROXY_PORT=5353
+      SECMEM_REQUIRE_MLOCK: "true"
+      # zero-trust config flags
+      TOR_INSTANCES: "8"
+      TORGO_ENABLE_LUKS_RAM: "1"
+      TORGO_BLIND_CONTROLP: "1"
+      COMMON_SOCKS_BIND_ADDR: "0.0.0.0"
+      COMMON_SOCKS_PROXY_PORT: "9150"
+      COMMON_DNS_PROXY_PORT: "5353"
+
     healthcheck:
-      test: ["CMD-SHELL", "timeout 3 bash -c 'echo > /dev/tcp/127.0.0.1/9150' || exit 1"]
+      test: ["CMD", "sh", "-c", "timeout 3 bash -c '</dev/tcp/127.0.0.1/9150'"]
       interval: 30s
       timeout: 5s
-      retries: 3
-      start_period: 60s
-    # Rootless net: Host mode for Tor binds (gVisor isolates packets)
-    network_mode: host
-    # Scale hint: --scale=8 in nerdctl
+      retries: 5
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
