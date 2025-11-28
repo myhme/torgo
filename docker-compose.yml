@@ -1,49 +1,41 @@
 services:
-  torgo:
-    build: .
+  torgo-gvisor:
+    image: torgo-gvisor:latest  # Build with updated Dockerfile
     container_name: torgo-zt
+    runtime: runsc  # gVisor syscall trap – host-proof
     restart: unless-stopped
-    # Use the specific user created in the Dockerfile
-    user: "106:106"
-    runtime: firecracker
-    privileged: false
+    user: "1000:1000"  # Rootless: Your host UID/GID
     read_only: true
-    # Use host network to simplify network stack and avoid Docker bridge overhead
-    # We bind directly to the WireGuard IP in the environment variables
-    network_mode: host 
-    
     tmpfs:
-      - /var/lib/tor-temp:size=512m,mode=700,noexec,nosuid,nodev
-      - /run:size=32m,noexec,nosuid,nodev
-      - /tmp:size=64m,noexec,nosuid,nodev
-    
-    cap_drop:
-      - ALL
+      - /var/lib/tor-temp:size=1g,mode=700,noexec,nosuid,nodev  # LUKS headroom (x8=8GB)
+      - /run:size=64m,noexec,nosuid,nodev
+      - /tmp:size=128m,noexec,nosuid,nodev
+    cap_drop: [ALL]
     cap_add:
-      # NET_ADMIN is the most dangerous capability and is LIKELY unnecessary
-      # since we only bind ports and don't manage iptables or complex routing.
-      - IPC_LOCK # REQUIRED for mlockall to protect sensitive memory
-      - SYS_ADMIN    # needed for mount/unmount of encrypted devices
+      - IPC_LOCK  # mlock keys
+      - SYS_ADMIN  # LUKS (gVisor traps abuse)
       - SYS_CHROOT
-
     security_opt:
       - no-new-privileges:true
+      - seccomp=unconfined  # gVisor owns filtering – kills exploits
     ulimits:
-      memlock: -1 # Required for mlockall to prevent sensitive memory from being swapped
+      memlock: -1
       core: 0
-      
+      nofile: 1024  # Low for DoS-proof
     environment:
       - SECMEM_REQUIRE_MLOCK=true
+      - SECMEM_STRICT=1  # Fatal on hardening fails
       - TOR_INSTANCES=8
-      - TORGO_ENABLE_LUKS_RAM=1
-      - TORGO_BLIND_CONTROLP=1
+      - TORGO_ENABLE_LUKS_RAM=1  # Per-inst encryption
+      - TORGO_BLIND_CONTROLP=1    # No cookies/ports
       - COMMON_SOCKS_PROXY_PORT=9150
       - COMMON_DNS_PROXY_PORT=5353
-
     healthcheck:
-      test: ["CMD", "sh", "-c", "timeout 3 bash -c '</dev/tcp/127.0.0.1/9150'"]
+      test: ["CMD-SHELL", "timeout 3 bash -c 'echo > /dev/tcp/127.0.0.1/9150' || exit 1"]
       interval: 30s
       timeout: 5s
-      retries: 5
-
-    # Removed the 'networks' block as we are using 'network_mode: host'
+      retries: 3
+      start_period: 60s
+    # Rootless net: Host mode for Tor binds (gVisor isolates packets)
+    network_mode: host
+    # Scale hint: --scale=8 in nerdctl

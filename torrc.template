@@ -1,4 +1,4 @@
-# === CORE HARDENING ===
+# === 2025 ZERO-TRUST BLINDED TOR ===
 ClientOnly 1
 AvoidDiskWrites 1
 SafeLogging 1
@@ -14,7 +14,7 @@ AutomapHostsSuffixes .onion,.exit
 SocksPort __SOCKSPORT__ IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
 DNSPort __DNSPORT__ AutomapHostsOnResolve 1
 
-# Blind instance – no control port, no cookie
+# BLINDED: No control, no auth – zero metadata leaks
 UseEntryGuards 0
 NumEntryGuards 0
 MaxCircuitDirtiness 55

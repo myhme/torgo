@@ -16,6 +16,7 @@ import (
 	"torgo/internal/health"
 	"torgo/internal/secmem"
 	"torgo/internal/socks"
+	"torgo/internal/selfcheck"
 )
 
 func main() {
@@ -25,6 +26,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer secmem.Wipe()
+
+    // 1.5 Runtime environment self-check (caps, tracing, uid/gid)
+    if err := selfcheck.Enforce(); err != nil {
+        slog.Error("environment self-check failed", "err", err)
+        os.Exit(1)
+    }
 
 	if os.Getenv("SECMEM_REQUIRE_MLOCK") == "true" && !secmem.IsMLocked() {
 		slog.Error("mlockall failed — refusing to run on hostile host")
