@@ -1,58 +1,31 @@
 {
   "defaultAction": "SCMP_ACT_ERRNO",
-  "architectures": ["SCMP_ARCH_X86_64"],
+  "archMap": [
+    { "architecture": "SCMP_ARCH_X86_64", "subArchitectures": [] }
+  ],
   "syscalls": [
-    { 
+    {
       "names": [
-        "ptrace", "process_vm_readv", "process_vm_writev", 
-        "kexec_load", "kexec_file_load", "perf_event_open", 
-        "swapon", "swapoff"
-      ], 
-      "action": "SCMP_ACT_KILL" 
-    },
-    { 
-      "names": [
-        "open_by_handle_at", "bpf", "mknod", "mknodat", 
-        "add_key", "request_key", "keyctl"
-      ], 
-      "action": "SCMP_ACT_ERRNO" 
-    },
-    { 
-      "names": [
-        "clone", "fork", "vfork", "execve", "execveat", 
-        "exit", "exit_group", "wait4", "getpid", "getppid", 
-        "gettid", "kill", "tgkill", "rt_sigaction", "rt_sigprocmask"
-      ], 
-      "action": "SCMP_ACT_ALLOW" 
-    },
-    { 
-      "names": [
-        "read", "write", "close", "openat", "fstat", "lstat", 
-        "stat", "access", "chown", "fchown", "mkdir", "rmdir", "unlink"
-      ], 
-      "action": "SCMP_ACT_ALLOW" 
-    },
-    { 
-      "names": [
-        "mmap", "munmap", "mprotect", "mlock", "mlockall", 
-        "mremap", "prctl"
-      ], 
-      "action": "SCMP_ACT_ALLOW" 
-    },
-    { 
-      "names": [
-        "socket", "bind", "listen", "accept", "connect", 
-        "sendto", "recvfrom", "getsockopt", "setsockopt", 
-        "shutdown", "sendmsg", "recvmsg", "getpeername", "getsockname"
-      ], 
-      "action": "SCMP_ACT_ALLOW" 
-    },
-    { 
-      "names": [
-        "epoll_wait", "epoll_ctl", "poll", "select", 
-        "futex", "nanosleep", "clock_gettime", "time"
-      ], 
-      "action": "SCMP_ACT_ALLOW" 
+        "read","write","close","fstat","lseek","mmap","mprotect","munmap",
+        "brk","rt_sigaction","rt_sigprocmask","ioctl","pread64","pwrite64",
+        "readv","writev","access","pipe","select","pselect6","sched_yield",
+        "mremap","msync","mincore","madvise","shmget","shmat","shmctl",
+        "dup","dup2","nanosleep","getpid","sendfile","socket","connect",
+        "accept","sendto","recvfrom","sendmsg","recvmsg","shutdown","bind",
+        "listen","getsockname","getpeername","setsockopt","getsockopt",
+        "clone","fork","vfork","execve","wait4","kill","uname","semget",
+        "semop","semctl","shmget","futex","setxattr","lgetxattr","lsetxattr",
+        "listxattr","llistxattr","removexattr","getrandom","open","openat",
+        "mkdir","rmdir","unlink","unlinkat","stat","fstatat","fchmod",
+        "fchmodat","fchown","fchownat","eventfd2","inotify_init1",
+        "inotify_add_watch","inotify_rm_watch","epoll_create1","epoll_ctl",
+        "epoll_wait","signalfd4","timerfd_create","timerfd_settime",
+        "clock_gettime","gettimeofday","settimeofday",
+        "mount","umount2","mknod","mknodat","ioctl","mlock","mlockall","munlock",
+        "prlimit64","setrlimit","getrandom"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": []
     }
   ]
 }
