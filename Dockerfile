@@ -54,12 +54,12 @@ ARG APP_NAME
 RUN apk add --no-cache \
       tor \
       cryptsetup \
-      util-linux \
-      e2fsprogs \
       libssl3 \
       libcrypto3 \
       libevent \
       zlib \
+      util-linux \
+      e2fsprogs \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
 
 # Copy built binary from builder (correct arch for each image)
