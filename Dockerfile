@@ -8,7 +8,7 @@ ARG ALPINE_VERSION=3.22
 ARG APP_NAME=torgo
 
 ##############################################
-# Builder stage (builds per-architecture)
+# Builder stage (multi-arch, pure Go – no cgo)
 ##############################################
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 
@@ -16,33 +16,31 @@ ARG APP_NAME
 ARG TARGETOS
 ARG TARGETARCH
 
-# Ensure Go builds correct architecture
-ENV CGO_ENABLED=1 \
+# Use Go's built-in cross-compiler (no cgo → no external GCC/asm)
+ENV CGO_ENABLED=0 \
     GOOS=${TARGETOS} \
     GOARCH=${TARGETARCH} \
     GOMODCACHE=/tmp/go-cache
 
-# Minimal build deps
+# Only what we actually need: git for modules, binutils for strip
 RUN apk add --no-cache \
       git \
-      gcc \
-      musl-dev \
-      build-base
+      binutils
 
 WORKDIR /src
 
-# Modules first (cache-friendly)
+# Go module deps first (better layer cache)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy full source
+# Copy the rest of the source
 COPY . .
 
-# Build statically-linked per-arch binary
+# Build per-arch torgo binary
 RUN go build \
       -trimpath \
       -mod=readonly \
-      -ldflags="-s -w -extldflags=-static -buildid=" \
+      -ldflags="-s -w -buildid=" \
       -o "/${APP_NAME}" "./cmd/${APP_NAME}" \
     && strip --strip-all "/${APP_NAME}"
 
@@ -63,16 +61,16 @@ RUN apk add --no-cache \
       zlib \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
 
-# Install built binary
+# Copy built binary from builder (correct arch for each image)
 COPY --from=builder "/${APP_NAME}" "/usr/local/bin/${APP_NAME}"
 
-# Tor template (must exist in repo root)
+# Tor configuration template
 COPY torrc.template /etc/tor/torrc.template
 
-# Optional hardened seccomp profile
+# Optional hardened seccomp profile (if you mount it via volume, you can skip)
 # COPY seccomp.json /etc/torgo/seccomp.json
 
-# Run as Alpine `tor` user (uid=106, gid=112)
+# Run as Alpine tor user (uid=106, gid=112)
 USER 106:112
 
 ENTRYPOINT ["/usr/local/bin/torgo"]
