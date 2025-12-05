@@ -1,31 +1,34 @@
 {
   "defaultAction": "SCMP_ACT_ERRNO",
-  "archMap": [
-    { "architecture": "SCMP_ARCH_X86_64", "subArchitectures": [] }
-  ],
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86"],
   "syscalls": [
     {
-      "names": [
-        "read","write","close","fstat","lseek","mmap","mprotect","munmap",
-        "brk","rt_sigaction","rt_sigprocmask","ioctl","pread64","pwrite64",
-        "readv","writev","access","pipe","select","pselect6","sched_yield",
-        "mremap","msync","mincore","madvise","shmget","shmat","shmctl",
-        "dup","dup2","nanosleep","getpid","sendfile","socket","connect",
-        "accept","sendto","recvfrom","sendmsg","recvmsg","shutdown","bind",
-        "listen","getsockname","getpeername","setsockopt","getsockopt",
-        "clone","fork","vfork","execve","wait4","kill","uname","semget",
-        "semop","semctl","shmget","futex","setxattr","lgetxattr","lsetxattr",
-        "listxattr","llistxattr","removexattr","getrandom","open","openat",
-        "mkdir","rmdir","unlink","unlinkat","stat","fstatat","fchmod",
-        "fchmodat","fchown","fchownat","eventfd2","inotify_init1",
-        "inotify_add_watch","inotify_rm_watch","epoll_create1","epoll_ctl",
-        "epoll_wait","signalfd4","timerfd_create","timerfd_settime",
-        "clock_gettime","gettimeofday","settimeofday",
-        "mount","umount2","mknod","mknodat","ioctl","mlock","mlockall","munlock",
-        "prlimit64","setrlimit","getrandom"
-      ],
-      "action": "SCMP_ACT_ALLOW",
-      "args": []
+      "names": ["open", "openat", "close", "read", "write", "fstat", "stat", "lseek", "mmap", "mprotect", "munmap", "brk", "access"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["prctl", "setrlimit", "arch_prctl", "clone", "execve", "execveat"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["mount", "umount2", "pivot_root", "setns", "ioctl"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["mlockall", "mlock", "munlock", "munlockall"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["capset", "capget", "getpid", "getuid", "geteuid", "getgid", "getegid"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["fchown", "chown", "fchmod", "chmod", "chdir", "mkdir", "rmdir", "unlink", "rename"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["ioctl", "poll", "ppoll", "select", "epoll_wait", "epoll_ctl"],
+      "action": "SCMP_ACT_ALLOW"
     }
   ]
 }

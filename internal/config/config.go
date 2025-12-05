@@ -56,7 +56,10 @@ type Instance struct {
 	mapperName string
 	cmd        *exec.Cmd
 
-	luksKey []byte // ephemeral LUKS key (kernel holds real copy)
+	luksKey  []byte // ephemeral LUKS key (kernel holds real copy)
+	loopDev  string // loop device used for the tmpfs-backed file (if any)
+	imgPath  string // path to backing image file
+	luksSize int    // size in MB of the file
 }
 
 var (
@@ -100,10 +103,11 @@ func Load() *Config {
 	c.StableMaxConnsPerInstance = getInt("TORGO_STABLE_MAX_CONNS",
 		max(c.MaxConnsPerInstance*2, 64), 8192)
 
+	// raw stable rotate seconds (could be > 1h from env, we clamp next)
 	rawStableRotateSecs := getInt("TORGO_STABLE_ROTATE_SECS",
 		max(c.RotateAfterSeconds*4, 3600), 7*24*3600)
 	if rawStableRotateSecs > 3600 {
-		rawStableRotateSecs = 3600 // cap 1 hour
+		rawStableRotateSecs = 3600 // hard cap at 1 hour
 	}
 	if rawStableRotateSecs <= 0 {
 		rawStableRotateSecs = 3600
@@ -149,7 +153,11 @@ func Load() *Config {
 }
 
 func (i *Instance) Start() error {
+	// Per-instance dir (may be LUKS-backed)
 	i.DataDir = "/var/lib/tor/i" + itoaQuick(i.ID)
+
+	// Determine per-image size (MB) – configurable, default 64MB
+	i.luksSize = getInt("TORGO_LUKS_SIZE_MB", 64, 1024)
 
 	if cfg.EnableLUKS {
 		if err := i.setupLUKSRAM(); err != nil {
@@ -177,12 +185,14 @@ func (i *Instance) Start() error {
 	var b strings.Builder
 	b.Grow(2048)
 
+	// Use configured bind address (makes it easier to expose SOCKS externally
+	// via compose env COMMON_SOCKS_BIND_ADDR). Note: exposing to 0.0.0.0 has
+	// privacy/isolation implications.
 	data := map[string]string{
-		"SOCKSPORT": "127.0.0.1:" + itoaQuick(i.SocksPort),
-		"DNSPORT":   "127.0.0.1:" + itoaQuick(i.DNSPort),
+		"SOCKSPORT": cfg.SocksBindAddr + ":" + itoaQuick(i.SocksPort),
+		"DNSPORT":   cfg.SocksBindAddr + ":" + itoaQuick(i.DNSPort),
 		"DATADIR":   i.DataDir,
 	}
-
 	if err := globalTmpl.Execute(&b, data); err != nil {
 		return fmt.Errorf("template exec failed: %w", err)
 	}
@@ -190,7 +200,6 @@ func (i *Instance) Start() error {
 	cmd := exec.Command("tor", "-f", "/dev/stdin")
 	cmd.Stdin = strings.NewReader(b.String())
 	cmd.Dir = i.DataDir
-
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: 106, Gid: 112},
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID |
@@ -206,15 +215,48 @@ func (i *Instance) Start() error {
 
 	i.cmd = cmd
 	if err := cmd.Start(); err != nil {
+		slog.Error("tor start failed", "id", i.ID, "err", err)
 		return err
 	}
-
 	slog.Info("tor instance started", "id", i.ID, "socks", i.SocksPort, "dns", i.DNSPort)
 	return nil
 }
 
-// LUKS over /dev/zero → encrypted RAM-only device, no disk trace.
+// LUKS over a tmpfs-backed file → encrypted RAM-only device, more portable
+// inside containers than relying on /dev/zero. This uses a loop device and
+// cryptsetup to create the encrypted mapping.
 func (i *Instance) setupLUKSRAM() error {
+	// create backing directories
+	if err := os.MkdirAll("/var/lib/tor-temp", 0o755); err != nil {
+		return fmt.Errorf("mkdir /var/lib/tor-temp: %w", err)
+	}
+
+	// image path on tmpfs; Compose mounts /var/lib/tor-temp as tmpfs by default
+	imgPath := filepath.Join("/var/lib/tor-temp", fmt.Sprintf("i%d.img", i.ID))
+	i.imgPath = imgPath
+
+	// create/truncate image to requested size
+	sizeBytes := int64(i.luksSize) * 1024 * 1024
+	f, err := os.OpenFile(imgPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("create img: %w", err)
+	}
+	if err := f.Truncate(sizeBytes); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("truncate img: %w", err)
+	}
+	_ = f.Close()
+
+	// set up a loop device for the image
+	losetupCmd := exec.Command("losetup", "--find", "--show", imgPath)
+	loopOut, err := losetupCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("losetup failed: %w (out: %s)", err, loopOut)
+	}
+	loopDev := strings.TrimSpace(string(loopOut))
+	i.loopDev = loopDev
+
+	// generate key and open with cryptsetup (plain mapping)
 	key := make([]byte, 64)
 	if _, err := rand.Read(key); err != nil {
 		return fmt.Errorf("key gen failed: %w", err)
@@ -224,49 +266,68 @@ func (i *Instance) setupLUKSRAM() error {
 	mapper := fmt.Sprintf("torgo-enc-%d", i.ID)
 	i.mapperName = mapper
 
-	cmd := exec.Command("cryptsetup", "open", "--type", "plain", "--key-file", "-",
-		"--cipher", "aes-xts-plain64", "--key-size", "512", "/dev/zero", mapper)
-
-	// Feed key into stdin, but DO NOT set Stdout/Stderr when using CombinedOutput.
-	cmd.Stdin = bytes.NewReader(key)
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
+	cryptCmd := exec.Command("cryptsetup", "open", "--type", "plain", "--key-file", "-", "--cipher", "aes-xts-plain64", "--key-size", "512", loopDev, mapper)
+	cryptCmd.Stdin = bytes.NewReader(key)
+	if out, err := cryptCmd.CombinedOutput(); err != nil {
+		// detach loop on error
+		_ = exec.Command("losetup", "-d", loopDev).Run()
 		return fmt.Errorf("cryptsetup open failed: %w (out: %s)", err, out)
 	}
 
 	dev := filepath.Join("/dev/mapper", mapper)
 
-	if err := os.MkdirAll("/var/lib/tor-temp", 0o755); err != nil {
-		return err
+	// make filesystem on the mapped device (mkfs.ext4). Use -F to force.
+	if out, err := exec.Command("mkfs.ext4", "-F", dev).CombinedOutput(); err != nil {
+		// cleanup: close mapping and detach loop
+		_ = exec.Command("cryptsetup", "close", mapper).Run()
+		_ = exec.Command("losetup", "-d", loopDev).Run()
+		return fmt.Errorf("mkfs.ext4 failed: %w (out: %s)", err, out)
 	}
 
+	// mount the mapped device at a per-instance mountpoint
 	mountPoint := filepath.Join("/var/lib/tor-temp", fmt.Sprintf("i%d", i.ID))
 	if err := os.MkdirAll(mountPoint, 0o700); err != nil {
+		_ = exec.Command("cryptsetup", "close", mapper).Run()
+		_ = exec.Command("losetup", "-d", loopDev).Run()
 		return err
 	}
 
-	if err := syscall.Mount(dev, mountPoint, "ext4",
-		syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC,
-		"discard,errors=remount-ro"); err != nil {
+	if err := syscall.Mount(dev, mountPoint, "ext4", syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, "discard,errors=remount-ro"); err != nil {
+		_ = exec.Command("cryptsetup", "close", mapper).Run()
+		_ = exec.Command("losetup", "-d", loopDev).Run()
 		return fmt.Errorf("LUKS mount failed: %w", err)
 	}
 
 	i.DataDir = mountPoint
-	return os.Chown(mountPoint, 106, 112)
+	if err := os.Chown(mountPoint, 106, 112); err != nil {
+		// non-fatal: try to continue but log
+		slog.Warn("chown mountpoint failed", "err", err)
+	}
+	return nil
 }
 
 func (i *Instance) Close() {
+	// stop tor process
 	if i.cmd != nil && i.cmd.Process != nil {
 		_ = i.cmd.Process.Signal(syscall.SIGTERM)
 		_ = i.cmd.Wait()
 	}
+	// unmount and remove mountpoint
 	if i.DataDir != "" {
 		_ = syscall.Unmount(i.DataDir, syscall.MNT_DETACH)
 		_ = os.RemoveAll(i.DataDir)
 	}
+	// close cryptsetup mapping
 	if i.mapperName != "" {
 		_ = exec.Command("cryptsetup", "close", i.mapperName).Run()
+	}
+	// detach loop device if any
+	if i.loopDev != "" {
+		_ = exec.Command("losetup", "-d", i.loopDev).Run()
+	}
+	// remove backing image file
+	if i.imgPath != "" {
+		_ = os.Remove(i.imgPath)
 	}
 }
 
