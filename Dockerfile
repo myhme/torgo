@@ -65,10 +65,11 @@ COPY --from=builder "/${APP_NAME}" "/usr/local/bin/${APP_NAME}"
 # Tor configuration template
 COPY torrc.template /etc/tor/torrc.template
 
-# Optional hardened seccomp profile (if you mount it via volume, you can skip)
-# COPY seccomp.json /etc/torgo/seccomp.json
+# IMPORTANT:
+# Do NOT drop to the tor user here – we want root inside container
+# so secmem can tweak /proc/self/coredump_filter and similar.
+# (Compose will still keep the container itself sandboxed.)
 
-# Run as Alpine tor user (uid=106, gid=112)
-USER 106:112
+# USER 106:112    # ← REMOVE or comment this out
 
 ENTRYPOINT ["/usr/local/bin/torgo"]
