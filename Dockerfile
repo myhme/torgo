@@ -22,10 +22,9 @@ ENV CGO_ENABLED=0 \
     GOARCH=${TARGETARCH} \
     GOMODCACHE=/tmp/go-cache
 
-# Only what we actually need: git for modules, binutils for strip
+# Only what we actually need: git for modules
 RUN apk add --no-cache \
-      git \
-      binutils
+      git
 
 WORKDIR /src
 
@@ -36,13 +35,12 @@ RUN go mod download
 # Copy the rest of the source
 COPY . .
 
-# Build per-arch torgo binary
+# Build per-arch torgo binary (no external strip)
 RUN go build \
       -trimpath \
       -mod=readonly \
       -ldflags="-s -w -buildid=" \
-      -o "/${APP_NAME}" "./cmd/${APP_NAME}" \
-    && strip --strip-all "/${APP_NAME}"
+      -o "/${APP_NAME}" "./cmd/${APP_NAME}"
 
 ##############################################
 # Final runtime stage (minimal Alpine)
