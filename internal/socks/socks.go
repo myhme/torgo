@@ -13,39 +13,67 @@ import (
 	"torgo/internal/config"
 )
 
-// Runtime counters (atomic, no mutex)
+// per-instance state (supports up to 32 instances)
 var (
 	totalConns          uint32
-	instanceConns       [32]uint32 // current active conns per instance
-	instanceTotal       [32]uint64 // total conns served since last rotation
-	instanceDraining    [32]uint32 // 1 = draining (no new conns), 0 = normal
-	instanceLastRestart [32]int64  // unix timestamp of last restart
+	instanceConns       [32]uint32 // active conns
+	instanceTotal       [32]uint64 // total conns since last restart
+	instanceDraining    [32]uint32 // 1 = draining, 0 = normal
+	instanceLastRestart [32]int64  // unix ts
+
+	// per-instance tuning (tier aware)
+	instMaxConns    [32]int32
+	instRotateConns [32]uint64
+	instRotateSecs  [32]int64
+	instTier        [32]uint8 // 0 = stable, 1 = paranoid
 )
 
-// Env-tunable limits (set in Start from cfg)
 var (
-	maxConnsPerInstance int32 = 64
-	maxTotalConns       int32 = 512
-	rotateAfterConns    uint64 = 64
-	rotateAfterSeconds  int64  = 900
-	connTimeout                = 15 * time.Minute
+	maxTotalConns int32 = 512
+	connTimeout         = 15 * time.Minute
 )
 
-// Start listens on the public SOCKS address and dispatches connections
-// across Tor instances with per-instance limits and rotation.
+// Start binds SOCKS and dispatches connections across a two-tier pool.
 func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
-	// Pull tunables from config
-	if cfg.MaxConnsPerInstance > 0 {
-		maxConnsPerInstance = int32(cfg.MaxConnsPerInstance)
+	instCount := len(insts)
+	if instCount == 0 {
+		slog.Error("no instances configured")
+		return
 	}
+	if instCount > 32 {
+		instCount = 32
+	}
+
+	// Pull globals
 	if cfg.MaxTotalConns > 0 {
 		maxTotalConns = int32(cfg.MaxTotalConns)
 	}
-	if cfg.RotateAfterConns > 0 {
-		rotateAfterConns = uint64(cfg.RotateAfterConns)
+
+	// Tier layout: first StableInstances are "stable", rest "paranoid"
+	stableCount := cfg.StableInstances
+	if stableCount > instCount {
+		stableCount = instCount
 	}
-	if cfg.RotateAfterSeconds > 0 {
-		rotateAfterSeconds = int64(cfg.RotateAfterSeconds)
+	if stableCount < 0 {
+		stableCount = 0
+	}
+
+	now := time.Now().Unix()
+	for idx := 0; idx < instCount; idx++ {
+		isParanoid := idx >= stableCount
+
+		if isParanoid {
+			instTier[idx] = 1
+			instMaxConns[idx] = int32(cfg.ParanoidMaxConnsPerInstance)
+			instRotateConns[idx] = uint64(cfg.ParanoidRotateConns)
+			instRotateSecs[idx] = int64(cfg.ParanoidRotateSeconds)
+		} else {
+			instTier[idx] = 0
+			instMaxConns[idx] = int32(cfg.StableMaxConnsPerInstance)
+			instRotateConns[idx] = uint64(cfg.StableRotateConns)
+			instRotateSecs[idx] = int64(cfg.StableRotateSeconds)
+		}
+		atomic.StoreInt64(&instanceLastRestart[idx], now)
 	}
 
 	addr := net.JoinHostPort(cfg.SocksBindAddr, cfg.SocksPort)
@@ -55,21 +83,16 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		return
 	}
 	defer l.Close()
+
 	slog.Info("SOCKS proxy active",
 		"addr", l.Addr(),
-		"maxConnsPerInstance", maxConnsPerInstance,
 		"maxTotalConns", maxTotalConns,
-		"rotateAfterConns", rotateAfterConns,
-		"rotateAfterSeconds", rotateAfterSeconds,
+		"stableCount", stableCount,
+		"paranoidCount", instCount-stableCount,
+		"paranoidTrafficPercent", cfg.ParanoidTrafficPercent,
 	)
 
-	// Initialize lastRestart timestamps
-	now := time.Now().Unix()
-	for i := range insts {
-		atomic.StoreInt64(&instanceLastRestart[i], now)
-	}
-
-	// Background rotation manager
+	// background rotation manager
 	go manageRotations(ctx, insts)
 
 	for {
@@ -82,11 +105,11 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 			continue
 		}
 		atomic.AddUint32(&totalConns, 1)
-		go handleSOCKS(c, insts)
+		go handleSOCKS(c, insts, cfg)
 	}
 }
 
-func handleSOCKS(client net.Conn, insts []*config.Instance) {
+func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) {
 	defer client.Close()
 	defer atomic.AddUint32(&totalConns, ^uint32(0))
 
@@ -96,56 +119,43 @@ func handleSOCKS(client net.Conn, insts []*config.Instance) {
 	if instCount == 0 {
 		return
 	}
-	instLen := big.NewInt(int64(instCount))
+	if instCount > 32 {
+		instCount = 32
+	}
 
-	// Smart LB: pick a random starting instance, then choose the one with
-	// the fewest active connections that is not draining and under limit.
-	randIdx, _ := rand.Int(rand.Reader, instLen)
-	start := int(randIdx.Int64())
-
-	var chosen *config.Instance
-	chosenIdx := -1
-	bestLoad := ^uint32(0) // max uint32
-
-	for offset := 0; offset < instCount; offset++ {
-		idx := (start + offset) % instCount
-
-		// Skip draining instances
-		if atomic.LoadUint32(&instanceDraining[idx]) == 1 {
-			continue
-		}
-
-		load := atomic.LoadUint32(&instanceConns[idx])
-		if load >= uint32(maxConnsPerInstance) {
-			continue
-		}
-
-		if load < bestLoad {
-			bestLoad = load
-			chosenIdx = idx
+	// Decide which tier to try first for this connection
+	useParanoid := false
+	if cfg.ParanoidTrafficPercent > 0 {
+		rnd, _ := rand.Int(rand.Reader, big.NewInt(100))
+		if rnd.Int64() < int64(cfg.ParanoidTrafficPercent) {
+			useParanoid = true
 		}
 	}
 
+	chosenIdx := pickInstance(instCount, useParanoid)
 	if chosenIdx < 0 {
-		// All instances busy or draining
+		// fallback: try other tier
+		chosenIdx = pickInstance(instCount, !useParanoid)
+	}
+	if chosenIdx < 0 {
+		// all busy / draining
 		return
 	}
 
-	// Reserve a slot
-	if atomic.AddUint32(&instanceConns[chosenIdx], 1) > uint32(maxConnsPerInstance) {
-		// Raced; undo and give up
+	// reserve slot
+	if atomic.AddUint32(&instanceConns[chosenIdx], 1) > uint32(instMaxConns[chosenIdx]) {
 		atomic.AddUint32(&instanceConns[chosenIdx], ^uint32(0))
 		return
 	}
 	defer atomic.AddUint32(&instanceConns[chosenIdx], ^uint32(0))
 
-	chosen = insts[chosenIdx]
+	inst := insts[chosenIdx]
 	atomic.AddUint64(&instanceTotal[chosenIdx], 1)
 
-	// Build "127.0.0.1:PORT" without heap churn
+	// "127.0.0.1:PORT" with no heap churn
 	target := [16]byte{}
 	copy(target[:], "127.0.0.1:")
-	itoaPort(target[10:], uint16(chosen.SocksPort))
+	itoaPort(target[10:], uint16(inst.SocksPort))
 
 	tor, err := net.Dial("tcp", string(target[:]))
 	if err != nil {
@@ -154,16 +164,48 @@ func handleSOCKS(client net.Conn, insts []*config.Instance) {
 	defer tor.Close()
 	_ = tor.SetDeadline(time.Now().Add(connTimeout))
 
-	// Bounded io.Copy using fixed buffers
 	go boundedCopy(tor, client)
 	boundedCopy(client, tor)
 }
 
-// manageRotations periodically decides when to rotate (restart) Tor instances:
-//  - When an instance has served >= rotateAfterConns connections, OR
-//  - When it has been running for >= rotateAfterSeconds.
-// It marks the instance as "draining", waits until active conns reach 0, then
-// calls Restart(), which tears down LUKS + tmpfs + Tor and brings it back up.
+// pickInstance selects the least-loaded instance from the requested tier.
+func pickInstance(instCount int, wantParanoid bool) int {
+	// random start to avoid deterministic walking
+	randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(instCount)))
+	start := int(randIdx.Int64())
+
+	var bestIdx = -1
+	var bestLoad uint32 = ^uint32(0)
+
+	for off := 0; off < instCount; off++ {
+		idx := (start + off) % instCount
+
+		tier := instTier[idx]
+		if wantParanoid && tier != 1 {
+			continue
+		}
+		if !wantParanoid && tier != 0 {
+			continue
+		}
+
+		if atomic.LoadUint32(&instanceDraining[idx]) == 1 {
+			continue
+		}
+
+		load := atomic.LoadUint32(&instanceConns[idx])
+		limit := uint32(instMaxConns[idx])
+		if load >= limit {
+			continue
+		}
+		if load < bestLoad {
+			bestLoad = load
+			bestIdx = idx
+		}
+	}
+	return bestIdx
+}
+
+// Rotation manager: per-instance thresholds from instRotateConns / instRotateSecs.
 func manageRotations(ctx context.Context, insts []*config.Instance) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -175,6 +217,9 @@ func manageRotations(ctx context.Context, insts []*config.Instance) {
 		case <-ticker.C:
 			now := time.Now().Unix()
 			for idx, inst := range insts {
+				if idx >= len(insts) || idx >= 32 {
+					continue
+				}
 				if inst == nil {
 					continue
 				}
@@ -184,31 +229,34 @@ func manageRotations(ctx context.Context, insts []*config.Instance) {
 				last := atomic.LoadInt64(&instanceLastRestart[idx])
 				total := atomic.LoadUint64(&instanceTotal[idx])
 
+				rotConns := instRotateConns[idx]
+				rotSecs := instRotateSecs[idx]
+
 				if draining == 0 {
-					// Decide if we should start draining this instance
-					if total >= rotateAfterConns ||
-						(last != 0 && now-last >= rotateAfterSeconds) {
+					// should we start draining?
+					if (rotConns > 0 && total >= rotConns) ||
+						(rotSecs > 0 && last != 0 && now-last >= rotSecs) {
 						if atomic.CompareAndSwapUint32(&instanceDraining[idx], 0, 1) {
-							slog.Info("marking tor instance for rotation (draining)",
+							slog.Info("marking tor instance for rotation",
 								"id", inst.ID,
+								"tier", instTier[idx],
 								"total_conns", total,
 								"age_seconds", now-last,
 							)
 						}
 					}
 				} else {
-					// Already draining: wait for active conns to drop to 0
+					// draining: wait until no active conns, then restart
 					if active == 0 {
-						slog.Info("rotating tor instance", "id", inst.ID)
+						slog.Info("rotating tor instance", "id", inst.ID, "tier", instTier[idx])
 						if err := inst.Restart(); err != nil {
 							slog.Error("instance restart failed", "id", inst.ID, "err", err)
-							// Keep draining flag set; try again next tick
 							continue
 						}
 						atomic.StoreUint64(&instanceTotal[idx], 0)
 						atomic.StoreUint32(&instanceDraining[idx], 0)
 						atomic.StoreInt64(&instanceLastRestart[idx], now)
-						slog.Info("tor instance rotation complete", "id", inst.ID)
+						slog.Info("tor instance rotation complete", "id", inst.ID, "tier", instTier[idx])
 					}
 				}
 			}
@@ -216,7 +264,8 @@ func manageRotations(ctx context.Context, insts []*config.Instance) {
 	}
 }
 
-// Fast int→string for ports without allocation
+// --- helpers ---
+
 func itoaPort(buf []byte, n uint16) {
 	if n == 0 {
 		buf[0] = '0'
@@ -231,7 +280,6 @@ func itoaPort(buf []byte, n uint16) {
 	copy(buf, buf[i:])
 }
 
-// 64 KB fixed buffer + backpressure
 func boundedCopy(dst net.Conn, src net.Conn) (written int64, err error) {
 	buf := make([]byte, 64<<10)
 	for {

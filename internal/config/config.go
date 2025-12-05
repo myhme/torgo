@@ -21,18 +21,28 @@ type Config struct {
 	SocksBindAddr string
 	SocksPort     string
 	DNSPort       string
-	EnableLUKS    bool // Per-instance RAM encryption for zero-trust
-	BlindControl  bool // No control ports/cookies – blinded isolation
+	EnableLUKS    bool // per-instance RAM encryption
+	BlindControl  bool // no ControlPort/cookie
 
-	// New: tunable concurrency & rotation limits
+	// Global limits
 	MaxConnsPerInstance int
 	MaxTotalConns       int
 	RotateAfterConns    int
 	RotateAfterSeconds  int
 
-	// New: DNS concurrency limits
+	// DNS concurrency limits
 	DNSMaxConns        int
 	DNSMaxConnsPerInst int
+
+	// Two-tier pool config
+	StableInstances             int
+	StableMaxConnsPerInstance   int
+	StableRotateConns           int
+	StableRotateSeconds         int
+	ParanoidMaxConnsPerInstance int
+	ParanoidRotateConns         int
+	ParanoidRotateSeconds       int
+	ParanoidTrafficPercent      int // 0–100
 }
 
 type Instance struct {
@@ -42,19 +52,21 @@ type Instance struct {
 	DataDir    string
 	mapperName string
 	cmd        *exec.Cmd
-	luksKey    []byte // mlocked & poisoned – never leaks
+
+	luksKey []byte // ephemeral LUKS key (kernel holds real copy)
 }
 
 var (
 	globalTmpl *template.Template
 	once       sync.Once
-	cfg        *Config // Global zero-trust config
+	cfg        *Config
 )
 
 func Load() *Config {
 	n := getInt("TOR_INSTANCES", 8, 32)
 
-	cfg = &Config{
+	// base values
+	c := &Config{
 		Instances:     n,
 		SocksBindAddr: getEnv("COMMON_SOCKS_BIND_ADDR", "0.0.0.0"),
 		SocksPort:     getEnv("COMMON_SOCKS_PROXY_PORT", "9150"),
@@ -62,42 +74,74 @@ func Load() *Config {
 		EnableLUKS:    os.Getenv("TORGO_ENABLE_LUKS_RAM") == "1",
 		BlindControl:  os.Getenv("TORGO_BLIND_CONTROLP") == "1",
 
-		// Reasonable defaults with conservative hard caps
 		MaxConnsPerInstance: getInt("TORGO_MAX_CONNS_PER_INSTANCE", 64, 4096),
 		MaxTotalConns:       getInt("TORGO_MAX_TOTAL_CONNS", 512, 65535),
 		RotateAfterConns:    getInt("TORGO_ROTATE_CONNS", 64, 1_000_000),
-		RotateAfterSeconds:  getInt("TORGO_ROTATE_SECS", 900, 86_400), // 15 min → 24h max
+		RotateAfterSeconds:  getInt("TORGO_ROTATE_SECS", 900, 86_400),
 
 		DNSMaxConns:        getInt("TORGO_DNS_MAX_CONNS", 256, 4096),
 		DNSMaxConnsPerInst: getInt("TORGO_DNS_MAX_PER_INST", 64, 1024),
 	}
 
+	// default two-tier: half stable, half paranoid
+	defaultStable := n / 2
+	if defaultStable == 0 && n > 0 {
+		defaultStable = 1
+	}
+
+	c.StableInstances = clamp(getInt("TORGO_STABLE_INSTANCES", defaultStable, n), 0, n)
+
+	// tier defaults derived from global
+	c.StableMaxConnsPerInstance = getInt("TORGO_STABLE_MAX_CONNS",
+		max(c.MaxConnsPerInstance*2, 64), 8192)
+	c.StableRotateConns = getInt("TORGO_STABLE_ROTATE_CONNS",
+		max(c.RotateAfterConns*4, 256), 5_000_000)
+	c.StableRotateSeconds = getInt("TORGO_STABLE_ROTATE_SECS",
+		max(c.RotateAfterSeconds*4, 3600), 7*24*3600)
+
+	c.ParanoidMaxConnsPerInstance = getInt("TORGO_PARANOID_MAX_CONNS",
+		max(16, c.MaxConnsPerInstance/2), 2048)
+	c.ParanoidRotateConns = getInt("TORGO_PARANOID_ROTATE_CONNS",
+		max(16, c.RotateAfterConns/2), 1_000_000)
+	c.ParanoidRotateSeconds = getInt("TORGO_PARANOID_ROTATE_SECS",
+		max(120, c.RotateAfterSeconds/3), 24*3600)
+
+	c.ParanoidTrafficPercent = clamp(getInt("TORGO_PARANOID_TRAFFIC_PERCENT", 30, 100), 0, 100)
+
+	cfg = c
+
 	slog.Info("zero-trust config loaded",
-		"instances", cfg.Instances,
-		"luks", cfg.EnableLUKS,
-		"blind", cfg.BlindControl,
-		"maxConnsPerInstance", cfg.MaxConnsPerInstance,
-		"maxTotalConns", cfg.MaxTotalConns,
-		"rotateAfterConns", cfg.RotateAfterConns,
-		"rotateAfterSeconds", cfg.RotateAfterSeconds,
-		"dnsMaxConns", cfg.DNSMaxConns,
-		"dnsMaxConnsPerInst", cfg.DNSMaxConnsPerInst,
+		"instances", c.Instances,
+		"luks", c.EnableLUKS,
+		"blind", c.BlindControl,
+		"maxConnsPerInstance", c.MaxConnsPerInstance,
+		"maxTotalConns", c.MaxTotalConns,
+		"rotateAfterConns", c.RotateAfterConns,
+		"rotateAfterSeconds", c.RotateAfterSeconds,
+		"dnsMaxConns", c.DNSMaxConns,
+		"dnsMaxConnsPerInst", c.DNSMaxConnsPerInst,
+		"stableInstances", c.StableInstances,
+		"stableMaxConnsPerInstance", c.StableMaxConnsPerInstance,
+		"stableRotateConns", c.StableRotateConns,
+		"stableRotateSeconds", c.StableRotateSeconds,
+		"paranoidMaxConnsPerInstance", c.ParanoidMaxConnsPerInstance,
+		"paranoidRotateConns", c.ParanoidRotateConns,
+		"paranoidRotateSeconds", c.ParanoidRotateSeconds,
+		"paranoidTrafficPercent", c.ParanoidTrafficPercent,
 	)
 
-	return cfg
+	return c
 }
 
 func (i *Instance) Start() error {
-	// 1. Set DataDir first (zero-trust: ephemeral per-instance)
+	// Per-instance dir (may be LUKS-backed)
 	i.DataDir = "/var/lib/tor/i" + itoaQuick(i.ID)
 
-	// 2. Encrypt if enabled (LUKS-RAM: keys mlocked, wiped on exit)
 	if cfg.EnableLUKS {
 		if err := i.setupLUKSRAM(); err != nil {
 			slog.Error("LUKS setup failed", "id", i.ID, "err", err)
 			return err
 		}
-		slog.Info("LUKS-RAM mounted", "id", i.ID, "dir", i.DataDir)
 	} else {
 		if err := os.MkdirAll(i.DataDir, 0o700); err != nil {
 			return err
@@ -107,7 +151,6 @@ func (i *Instance) Start() error {
 		}
 	}
 
-	// 3. Blinded template (no control port – zero metadata)
 	once.Do(func() {
 		var err error
 		globalTmpl, err = template.ParseFiles("/etc/tor/torrc.template")
@@ -119,27 +162,23 @@ func (i *Instance) Start() error {
 
 	var b strings.Builder
 	b.Grow(2048)
-	socksStr := itoaQuick(i.SocksPort)
-	dnsStr := itoaQuick(i.DNSPort)
+
 	data := map[string]string{
-		"SOCKSPORT": "127.0.0.1:" + socksStr,
-		"DNSPORT":   "127.0.0.1:" + dnsStr,
+		"SOCKSPORT": "127.0.0.1:" + itoaQuick(i.SocksPort),
+		"DNSPORT":   "127.0.0.1:" + itoaQuick(i.DNSPort),
 		"DATADIR":   i.DataDir,
 	}
 	if err := globalTmpl.Execute(&b, data); err != nil {
 		return fmt.Errorf("template exec failed: %w", err)
 	}
 
-	// 4. Exec in full namespaces (user/pid/ns/ipc/net) – per-instance sandbox
 	cmd := exec.Command("tor", "-f", "/dev/stdin")
 	cmd.Stdin = strings.NewReader(b.String())
-	cmd.Dir = i.DataDir // Local cwd – no leaks
+	cmd.Dir = i.DataDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: 106, Gid: 112},
-		// Zero-trust isolation: Full stack – no shared views
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID |
 			syscall.CLONE_NEWNS | syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET,
-		// Map host UID/GID to guest root (unpriv ns hardening)
 		UidMappings: []syscall.SysProcIDMap{
 			{ContainerID: 0, HostID: 106, Size: 1},
 		},
@@ -158,18 +197,17 @@ func (i *Instance) Start() error {
 	return nil
 }
 
-// setupLUKSRAM: Ephemeral AES-XTS in RAM (512-bit key, no disk trace)
+// LUKS over /dev/zero → encrypted RAM-only backing, no disk trace.
 func (i *Instance) setupLUKSRAM() error {
-	key := make([]byte, 64) // 512-bit XTS – mlock'd globally
+	key := make([]byte, 64) // 512-bit key
 	if _, err := rand.Read(key); err != nil {
 		return fmt.Errorf("key gen failed: %w", err)
 	}
-	i.luksKey = key // Sealed – poisoned via secmem.Wipe()
+	i.luksKey = key
 
 	mapper := fmt.Sprintf("torgo-enc-%d", i.ID)
 	i.mapperName = mapper
 
-	// cryptsetup: Plain on /dev/zero (RAM ephemeral)
 	cmd := exec.Command("cryptsetup", "open", "--type", "plain", "--key-file", "-",
 		"--cipher", "aes-xts-plain64", "--key-size", "512", "/dev/zero", mapper)
 	cmd.Stdin = bytes.NewReader(key)
@@ -188,7 +226,6 @@ func (i *Instance) setupLUKSRAM() error {
 		return err
 	}
 
-	// Mount hardened (noexec/nosuid/nodev – leak-proof)
 	if err := syscall.Mount(dev, mountPoint, "ext4",
 		syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC,
 		"discard,errors=remount-ro"); err != nil {
@@ -199,33 +236,31 @@ func (i *Instance) setupLUKSRAM() error {
 	return os.Chown(mountPoint, 106, 112)
 }
 
-// Close stops the Tor process and tears down any encrypted mount.
 func (i *Instance) Close() {
 	if i.cmd != nil && i.cmd.Process != nil {
 		_ = i.cmd.Process.Signal(syscall.SIGTERM)
 		_ = i.cmd.Wait()
 	}
+	if i.DataDir != "" {
+		_ = syscall.Unmount(i.DataDir, syscall.MNT_DETACH)
+		_ = os.RemoveAll(i.DataDir)
+	}
 	if i.mapperName != "" {
 		_ = exec.Command("cryptsetup", "close", i.mapperName).Run()
 	}
-	if i.DataDir != "" {
-		_ = syscall.Unmount(i.DataDir, syscall.MNT_DETACH)
-		_ = os.RemoveAll(i.DataDir) // tmpfs/LUKS auto-wipe
-	}
 }
 
-// Restart cleanly tears down the instance and starts it again.
 func (i *Instance) Restart() error {
 	i.Close()
 	return i.Start()
 }
 
-// Blinded: No cookie exposure – zero-trust
 func (i *Instance) CookiePath() string { return "" }
 
-// itoaQuick: Zero-alloc int→str (ports only – 3 digits max)
+// --- helpers ---
+
 func itoaQuick(n int) string {
-	buf := [3]byte{}
+	buf := [8]byte{}
 	i := len(buf)
 	for n >= 10 {
 		i--
@@ -233,6 +268,7 @@ func itoaQuick(n int) string {
 		n /= 10
 	}
 	i--
+	// n is now 0–9
 	buf[i] = byte('0' + n)
 	return string(buf[i:])
 }
@@ -253,6 +289,23 @@ func getInt(env string, def, max int) int {
 	return def
 }
 
-// Anti-forensic: Obfuscate symbols
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// hide from naive forensics
 var _ = unsafe.Pointer(&globalTmpl)
 var _ = unsafe.Pointer(&cfg)
