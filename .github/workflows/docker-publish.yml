@@ -98,6 +98,11 @@ jobs:
             exit 1
           fi
 
+      # 🔹 NEW: install cosign before signing
+      - name: Install cosign (keyless)
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
+        uses: sigstore/cosign-installer@v3
+
       - name: Sign manifest list (keyless Cosign — zero secrets)
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
         env:
