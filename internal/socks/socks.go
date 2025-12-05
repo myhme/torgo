@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"math"
 	"net"
 	"sync/atomic"
 	"time"
@@ -69,7 +70,11 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 			instRotateSecs[idx] = int64(cfg.ParanoidRotateSeconds)
 		} else {
 			instTier[idx] = 0
-			instMaxConns[idx] = int32(cfg.StableMaxConnsPerInstance)
+			stableMax := cfg.StableMaxConnsPerInstance
+			if stableMax > math.MaxInt32 {
+				stableMax = math.MaxInt32
+			}
+			instMaxConns[idx] = int32(stableMax)
 			instRotateConns[idx] = uint64(cfg.StableRotateConns)
 			instRotateSecs[idx] = int64(cfg.StableRotateSeconds) // ≤ 1 hour, enforced in config
 		}
