@@ -94,7 +94,6 @@ jobs:
             exit 1
           fi
 
-      # Install cosign once (keyless mode)
       - name: Install cosign
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
         uses: sigstore/cosign-installer@v3
@@ -119,8 +118,6 @@ jobs:
           set -euo pipefail
           DIGEST="${{ steps.build.outputs.digest }}"
 
-          # Newer cosign requires an identity/issuer when verifying keyless signatures.
-          # This asserts: "image was signed by this repo's GitHub Actions using OIDC".
           cosign verify \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
@@ -141,8 +138,5 @@ jobs:
       - name: Success banner
         run: |
           echo "Torgo image built"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            echo "Dry-run mode: no push, no signing."
-          else
-            echo "Image pushed, signed, and verified"
-            echo "Manifest digest: ${{ env.IMAGE_REF }}@${{ steps.build.outputs.digest }}"
+          echo "Image pushed, signed, and verified"
+          echo "Manifest digest: ${{ env.IMAGE_REF }}@${{ steps.build.outputs.digest }}"

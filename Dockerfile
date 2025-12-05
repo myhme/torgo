@@ -1,15 +1,26 @@
 # syntax=docker/dockerfile:1.7
 
-# -------- Global build args (visible to all stages) --------
+##############################################
+# Global build arguments
+##############################################
 ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.22
 ARG APP_NAME=torgo
 
-# -------- Builder stage --------
+##############################################
+# Builder stage (builds per-architecture)
+##############################################
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 
-# Re-declare ARGs in this stage so they’re usable
 ARG APP_NAME
+ARG TARGETOS
+ARG TARGETARCH
+
+# Ensure Go builds correct architecture
+ENV CGO_ENABLED=1 \
+    GOOS=${TARGETOS} \
+    GOARCH=${TARGETARCH} \
+    GOMODCACHE=/tmp/go-cache
 
 # Minimal build deps
 RUN apk add --no-cache \
@@ -20,31 +31,29 @@ RUN apk add --no-cache \
 
 WORKDIR /src
 
-# Go module deps first (for caching)
+# Modules first (cache-friendly)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the rest of the source
+# Copy full source
 COPY . .
 
-# Build static-ish torgo binary
-# IMPORTANT: APP_NAME is now guaranteed to be set ("torgo" by default)
-RUN CGO_ENABLED=1 go build \
+# Build statically-linked per-arch binary
+RUN go build \
       -trimpath \
       -mod=readonly \
       -ldflags="-s -w -extldflags=-static -buildid=" \
       -o "/${APP_NAME}" "./cmd/${APP_NAME}" \
     && strip --strip-all "/${APP_NAME}"
 
-# If build fails (e.g. wrong path), the image build FAILS.
-# No more "|| true" masking real errors.
-
-# -------- Final runtime stage --------
+##############################################
+# Final runtime stage (minimal Alpine)
+##############################################
 FROM alpine:${ALPINE_VERSION} AS final
 
 ARG APP_NAME
 
-# Tor + cryptsetup + minimal libs
+# Tor + cryptsetup + required libs
 RUN apk add --no-cache \
       tor \
       cryptsetup \
@@ -54,16 +63,16 @@ RUN apk add --no-cache \
       zlib \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
 
-# Copy the built binary from builder
+# Install built binary
 COPY --from=builder "/${APP_NAME}" "/usr/local/bin/${APP_NAME}"
 
-# Tor configuration template (must be in repo root)
+# Tor template (must exist in repo root)
 COPY torrc.template /etc/tor/torrc.template
 
-# (Optional) copy seccomp profile, etc.
+# Optional hardened seccomp profile
 # COPY seccomp.json /etc/torgo/seccomp.json
 
-# Run as tor user (uid/gid from Alpine tor package)
+# Run as Alpine `tor` user (uid=106, gid=112)
 USER 106:112
 
 ENTRYPOINT ["/usr/local/bin/torgo"]
