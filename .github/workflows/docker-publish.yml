@@ -124,10 +124,9 @@ jobs:
           cosign verify \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${IMAGE_REF}@${DIGEST}" \
-          | grep -q "Verified OK"
+            "${IMAGE_REF}@${DIGEST}"
 
-          echo "All signatures verified OK for ${IMAGE_REF}@${DIGEST}"
+          echo "cosign verify succeeded for ${IMAGE_REF}@${DIGEST}"
 
       - name: Trim old untagged images (keep last 7 + all tagged)
         if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true')
