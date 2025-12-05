@@ -49,10 +49,13 @@ FROM alpine:${ALPINE_VERSION} AS final
 
 ARG APP_NAME
 
-# Tor + cryptsetup + required libs
+# Tor + cryptsetup + required libs and tools
+# Add util-linux (losetup) and e2fsprogs (mkfs.ext4) for LUKS-on-loop fallback.
 RUN apk add --no-cache \
       tor \
       cryptsetup \
+      util-linux \
+      e2fsprogs \
       libssl3 \
       libcrypto3 \
       libevent \
@@ -69,7 +72,6 @@ COPY torrc.template /etc/tor/torrc.template
 # Do NOT drop to the tor user here – we want root inside container
 # so secmem can tweak /proc/self/coredump_filter and similar.
 # (Compose will still keep the container itself sandboxed.)
-
-# USER 106:112    # ← REMOVE or comment this out
+# USER 106:112    # ← removed on purpose
 
 ENTRYPOINT ["/usr/local/bin/torgo"]

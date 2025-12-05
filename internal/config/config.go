@@ -100,10 +100,11 @@ func Load() *Config {
 	c.StableMaxConnsPerInstance = getInt("TORGO_STABLE_MAX_CONNS",
 		max(c.MaxConnsPerInstance*2, 64), 8192)
 
+	// raw stable rotate seconds (could be > 1h from env, we clamp next)
 	rawStableRotateSecs := getInt("TORGO_STABLE_ROTATE_SECS",
 		max(c.RotateAfterSeconds*4, 3600), 7*24*3600)
 	if rawStableRotateSecs > 3600 {
-		rawStableRotateSecs = 3600 // cap 1 hour
+		rawStableRotateSecs = 3600 // hard cap at 1 hour
 	}
 	if rawStableRotateSecs <= 0 {
 		rawStableRotateSecs = 3600
@@ -149,6 +150,7 @@ func Load() *Config {
 }
 
 func (i *Instance) Start() error {
+	// Per-instance dir (may be LUKS-backed)
 	i.DataDir = "/var/lib/tor/i" + itoaQuick(i.ID)
 
 	if cfg.EnableLUKS {
@@ -182,7 +184,6 @@ func (i *Instance) Start() error {
 		"DNSPORT":   "127.0.0.1:" + itoaQuick(i.DNSPort),
 		"DATADIR":   i.DataDir,
 	}
-
 	if err := globalTmpl.Execute(&b, data); err != nil {
 		return fmt.Errorf("template exec failed: %w", err)
 	}
@@ -190,7 +191,6 @@ func (i *Instance) Start() error {
 	cmd := exec.Command("tor", "-f", "/dev/stdin")
 	cmd.Stdin = strings.NewReader(b.String())
 	cmd.Dir = i.DataDir
-
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: 106, Gid: 112},
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID |
@@ -206,16 +206,16 @@ func (i *Instance) Start() error {
 
 	i.cmd = cmd
 	if err := cmd.Start(); err != nil {
+		slog.Error("tor start failed", "id", i.ID, "err", err)
 		return err
 	}
-
 	slog.Info("tor instance started", "id", i.ID, "socks", i.SocksPort, "dns", i.DNSPort)
 	return nil
 }
 
-// LUKS over /dev/zero → encrypted RAM-only device, no disk trace.
+// LUKS over /dev/zero → encrypted RAM-only backing, no disk trace.
 func (i *Instance) setupLUKSRAM() error {
-	key := make([]byte, 64)
+	key := make([]byte, 64) // 512-bit key
 	if _, err := rand.Read(key); err != nil {
 		return fmt.Errorf("key gen failed: %w", err)
 	}
@@ -226,21 +226,19 @@ func (i *Instance) setupLUKSRAM() error {
 
 	cmd := exec.Command("cryptsetup", "open", "--type", "plain", "--key-file", "-",
 		"--cipher", "aes-xts-plain64", "--key-size", "512", "/dev/zero", mapper)
-
-	// Feed key into stdin, but DO NOT set Stdout/Stderr when using CombinedOutput.
 	cmd.Stdin = bytes.NewReader(key)
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
+	// IMPORTANT: CombinedOutput() sets up internal pipes for stdout/stderr.
+	// Do NOT set cmd.Stdout or cmd.Stderr when using CombinedOutput(), it will
+	// cause "exec: Stdout already set" errors. Keep stdin so cryptsetup reads
+	// the key from memory, and use CombinedOutput to capture output on error.
+	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("cryptsetup open failed: %w (out: %s)", err, out)
 	}
 
 	dev := filepath.Join("/dev/mapper", mapper)
-
 	if err := os.MkdirAll("/var/lib/tor-temp", 0o755); err != nil {
 		return err
 	}
-
 	mountPoint := filepath.Join("/var/lib/tor-temp", fmt.Sprintf("i%d", i.ID))
 	if err := os.MkdirAll(mountPoint, 0o700); err != nil {
 		return err

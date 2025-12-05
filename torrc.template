@@ -1,4 +1,10 @@
 # === 2025 ZERO-TRUST BLINDED TOR ===
+# Container-first, diskless configuration tuned for privacy and SOCKS usability.
+# This template is rendered by torgo; placeholders:
+#   __DATADIR__  -> per-instance data dir (tmpfs or LUKS-backed)
+#   __SOCKSPORT__ -> host:port to bind SOCKS on loopback (e.g. 127.0.0.1:9150)
+#   __DNSPORT__  -> host:port for DNS (e.g. 127.0.0.1:5353)
+# Extra options may be injected via __EXTRA_TOR_OPTIONS__ at runtime.
 
 ########## Client-only, diskless ##########
 ClientOnly 1
@@ -10,6 +16,7 @@ Log notice stdout
 Log warn stderr
 Log err stderr
 
+# Don't leave pid files or data on disk in the image; DataDirectory is tmpfs or LUKS-backed.
 PidFile /dev/null
 DataDirectory __DATADIR__
 
@@ -19,16 +26,20 @@ AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
 ########## Local ports (torgo connects here on 127.0.0.1) ##########
+# torgo will render __SOCKSPORT__ and __DNSPORT__ as 127.0.0.1:PORT values.
 SocksPort __SOCKSPORT__ IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
 DNSPort __DNSPORT__ AutomapHostsOnResolve 1
 
 ########## BLINDED CONTROL SURFACE ##########
-# No ControlPort, no cookie auth – torgo is deliberately "blind".
-# If you ever see ControlPort or CookieAuthentication enabled here, something is wrong.
+# No ControlPort and no cookie auth — torgo manages instances, we stay "blind".
+ControlPort 0
+CookieAuthentication 0
+# If a ControlPort ever appears here, investigate (torgo expects a blind tor instance).
 UseEntryGuards 0
 NumEntryGuards 0
 
-########## Circuit / timeout behavior (very aggressive) ##########
+########## Circuit / timeout behavior (aggressive for privacy & rotation) ##########
+# These settings bias toward shorter-lived circuits and quicker rotation.
 MaxCircuitDirtiness 55
 NewCircuitPeriod 5
 CircuitBuildTimeout 7
@@ -38,18 +49,22 @@ SocksTimeout 120
 KeepalivePeriod 15
 
 ########## Routing policy ##########
+# StrictNodes reduces accidental routing through excluded countries.
 StrictNodes 1
 ExitNodes {us}{ca}{gb}{de}{nl}{no}{se}{fi}{ch}{is}{li}{lu}{dk}{at}{be}{fr}{jp}{au}{nz}
 ExcludeNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{hk}{tr}{il}{sg}{kr}{in}{br}{za}{ae}{qa}{sa}{id}{my}{th}{vn}{pk}{eg}{ma}{co}{ar}{cl}{pe}{bo}
 ExcludeExitNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{hk}{tr}{il}{sg}{kr}{in}{br}{za}{ae}{qa}{sa}
 
 ########## Network & address sanity ##########
+# Prefer IPv4-only to avoid accidental IPv6 leaks on some hosts.
 ClientUseIPv6 0
 EnforceDistinctSubnets 1
 FascistFirewall 1
+# Limit reachable ports to expected Tor client-relay ranges (torgo manages ports).
 ReachableAddresses *:9050-9059,*:9200-9299
 
 ########## Local hardening ##########
+# Require mlockall in env to treat failure as fatal (SECMEM_REQUIRE_MLOCK)
 DisableAllSwap 1
 HardwareAccel 0
 DisableDebuggerAttachment 1
@@ -60,6 +75,7 @@ WarnPlaintextPorts 1,22,25,109,110,143,993,995,6667
 RejectPlaintextPorts 1,22,25,109,110,143,993,995,6667
 
 ########## Padding / descriptors / GeoIP ##########
+# Keep padding modest (you can enable more if you accept the perf cost).
 CircuitPadding 0
 ReducedCircuitPadding 1
 ConnectionPadding 0
@@ -67,11 +83,20 @@ FastFirstHopPK 1
 ExtendByEd25519ID 1
 UseMicrodescriptors 1
 
-# Don't publish any descriptors, and avoid GeoIP lookups/files
+# Don't publish any onion descriptors nor use GeoIP files (container/no-disk).
 PublishServerDescriptor 0
 PublishHidServDescriptors 0
 GeoIPFile ""
 GeoIPv6File ""
+
+########## Behavior for logs / debugging ##########
+# Keep logs to stdout/stderr only (container will capture).
+# Prevent tor from writing runtime files to disk (torgo mounts tmpfs/LUKS).
+RunAsDaemon 0
+
+########## Safety notes for torgo ###
+# torgo expects to manage per-instance DataDirectory and will drop privileges
+# for the tor child. DataDirectory must be on tmpfs or LUKS-backed to avoid disk traces.
 
 ########## Extra override hook (for experiments only) ##########
 __EXTRA_TOR_OPTIONS__
