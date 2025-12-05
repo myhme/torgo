@@ -2,7 +2,12 @@ version: "3.9"
 
 services:
   torgo:
+    # You can either build locally or pull from GHCR.
+    # For local dev:
     build: .
+    # For pulling the published image instead, comment the build and uncomment:
+    # image: ghcr.io/myhme/torgo:latest
+
     container_name: torgo-zt
     restart: unless-stopped
 
@@ -13,7 +18,7 @@ services:
     read_only: true
     network_mode: host
 
-    # All writable paths are tmpfs → RAM only
+    # All writable paths are tmpfs → RAM only (no persistence)
     tmpfs:
       - /var/lib/tor-temp:size=512m,mode=700,noexec,nosuid,nodev
       - /var/lib/tor:size=256m,mode=700,noexec,nosuid,nodev
@@ -30,6 +35,10 @@ services:
 
     cap_drop:
       - ALL
+
+    # NOTE: SYS_ADMIN is only needed if TORGO_ENABLE_LUKS_RAM=1
+    # (for cryptsetup + mount/umount of the encrypted RAM volume).
+    # If you ever disable LUKS, you can drop SYS_ADMIN as well.
     cap_add:
       - IPC_LOCK    # secmem: mlockall
       - SYS_ADMIN   # cryptsetup + mount/umount for LUKS RAM
@@ -45,26 +54,43 @@ services:
       core: 0
 
     environment:
+      # Hard memory rules
       SECMEM_REQUIRE_MLOCK: "true"
-      # zero-trust config flags
+
+      # Core pool sizing
       TOR_INSTANCES: "8"
+
+      # Zero-trust disk: LUKS over /dev/zero + tmpfs mount
       TORGO_ENABLE_LUKS_RAM: "1"
-      TORGO_BLIND_CONTROLP: "1"
+
+      # Blind Tor control (no ControlPort in template)
+      TORGO_BLIND_CONTROL: "1"
+
+      # Bind addresses / ports
       COMMON_SOCKS_BIND_ADDR: "0.0.0.0"
       COMMON_SOCKS_PROXY_PORT: "9150"
       COMMON_DNS_PROXY_PORT: "5353"
 
-      # Rotation / concurrency
-      TORGO_MAX_CONNS_PER_INSTANCE: 64
-      TORGO_MAX_TOTAL_CONNS: 512
-      TORGO_ROTATE_CONNS: 64
-      TORGO_ROTATE_SECS: 900
+      # Connection limits (overall + per instance)
+      TORGO_MAX_CONNS_PER_INSTANCE: "64"   # per-instance cap
+      TORGO_MAX_TOTAL_CONNS: "512"         # global cap
 
-      # DNS concurrency 
-      TORGO_DNS_MAX_CONNS: 256
-      TORGO_DNS_MAX_PER_INST: 64
+      # Rotation policy (max chaos without killing UX)
+      # Rotate instance when it has handled this many conns…
+      TORGO_ROTATE_CONNS: "64"
+      # …or has been alive this many seconds (whichever comes first)
+      TORGO_ROTATE_SECS: "3600"            # 1 hour max lifetime
+
+      # DNS concurrency
+      TORGO_DNS_MAX_CONNS: "256"
+      TORGO_DNS_MAX_PER_INST: "64"
+
+      # Optional: timing jitter to de-sync fingerprints (0–X ms per conn)
+      TORGO_SOCKS_JITTER_MS_MAX: "40"      # tweak up/down as you like
+
+    # Healthcheck uses the torgo binary itself (no bash/timeout dependency)
     healthcheck:
-      test: ["CMD", "sh", "-c", "timeout 3 bash -c '</dev/tcp/127.0.0.1/9150'"]
+      test: ["CMD", "/usr/local/bin/torgo", "--selfcheck"]
       interval: 30s
       timeout: 5s
       retries: 5

@@ -31,7 +31,6 @@ jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     env:
-      # Image name in GHCR (repo-based)
       IMAGE_REF: ghcr.io/${{ github.repository }}
 
     steps:
@@ -47,7 +46,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
-        # Skip login only for workflow_dispatch + dry_run=true
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
         uses: docker/login-action@v3
         with:
@@ -70,8 +68,7 @@ jobs:
             type=sha,format=short
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value={{date 'YYYYMMDD'}}-{{sha short}},enable={{is_default_branch}}
-            # Extra manual tags only when running workflow_dispatch
-            type=raw,value=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tags || '' }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tags != '' }}
+            type=raw,value=${{ github.event.inputs.tags }},enable=${{ github.event.inputs.tags != '' }}
 
       - name: Build & push (multi-arch + SBOM + provenance)
         id: build
@@ -80,7 +77,6 @@ jobs:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          # Push only if NOT (workflow_dispatch + dry_run=true)
           push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -98,10 +94,12 @@ jobs:
             exit 1
           fi
 
-      # 🔹 NEW: install cosign before signing
-      - name: Install cosign (keyless)
+      # Install cosign once (keyless mode)
+      - name: Install cosign
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
         uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.5.2'
 
       - name: Sign manifest list (keyless Cosign — zero secrets)
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
@@ -109,7 +107,7 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
         run: |
           set -euo pipefail
-          DIGEST=${{ steps.build.outputs.digest }}
+          DIGEST="${{ steps.build.outputs.digest }}"
           echo "Signing manifest: ${DIGEST}"
           cosign sign --yes "${IMAGE_REF}@${DIGEST}"
 
@@ -119,32 +117,33 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
         run: |
           set -euo pipefail
-          DIGEST=${{ steps.build.outputs.digest }}
-          cosign verify "${IMAGE_REF}@${DIGEST}" | grep -q "Verified OK"
+          DIGEST="${{ steps.build.outputs.digest }}"
+
+          # Newer cosign requires an identity/issuer when verifying keyless signatures.
+          # This asserts: "image was signed by this repo's GitHub Actions using OIDC".
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE_REF}@${DIGEST}" \
+          | grep -q "Verified OK"
+
           echo "All signatures verified OK for ${IMAGE_REF}@${DIGEST}"
 
       - name: Trim old untagged images (keep last 7 + all tagged)
         if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          OWNER="${{ github.repository_owner }}"
-          PACKAGE_NAME="torgo"  # GHCR package name
-
-          echo "Trimming untagged container versions for ${OWNER}/${PACKAGE_NAME}..."
-
-          gh api -X GET "/users/${OWNER}/packages/container/${PACKAGE_NAME}/versions?per_page=100" \
+          gh api -X GET "/user/packages/container/torgo/versions?per_page=100" \
             --jq '.[] | select(.metadata.container.tags | length == 0) | .id' \
             | tail -n +8 \
-            | xargs -r -I{} gh api -X DELETE "/users/${OWNER}/packages/container/${PACKAGE_NAME}/versions/{}"
+            | xargs -r -I{} gh api -X DELETE "/user/packages/container/torgo/versions/{}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Success banner
         run: |
-          echo "Torgo image build completed."
+          echo "Torgo image built"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             echo "Dry-run mode: no push, no signing."
           else
-            echo "Image pushed, signed, and verified."
+            echo "Image pushed, signed, and verified"
             echo "Manifest digest: ${{ env.IMAGE_REF }}@${{ steps.build.outputs.digest }}"
-          fi
