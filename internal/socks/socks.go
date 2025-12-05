@@ -71,7 +71,7 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 			instTier[idx] = 0
 			instMaxConns[idx] = int32(cfg.StableMaxConnsPerInstance)
 			instRotateConns[idx] = uint64(cfg.StableRotateConns)
-			instRotateSecs[idx] = int64(cfg.StableRotateSeconds)
+			instRotateSecs[idx] = int64(cfg.StableRotateSeconds) // ≤ 1 hour, enforced in config
 		}
 		atomic.StoreInt64(&instanceLastRestart[idx], now)
 	}
@@ -90,6 +90,7 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		"stableCount", stableCount,
 		"paranoidCount", instCount-stableCount,
 		"paranoidTrafficPercent", cfg.ParanoidTrafficPercent,
+		"socksJitterMaxMs", cfg.SocksJitterMaxMs,
 	)
 
 	// background rotation manager
@@ -112,6 +113,18 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) {
 	defer client.Close()
 	defer atomic.AddUint32(&totalConns, ^uint32(0))
+
+	// Optional: timing jitter per connection (0..N ms)
+	if cfg.SocksJitterMaxMs > 0 {
+		jMax := cfg.SocksJitterMaxMs
+		if jMax > 5000 {
+			jMax = 5000 // sanity cap at 5s
+		}
+		rnd, _ := rand.Int(rand.Reader, big.NewInt(int64(jMax+1)))
+		if j := rnd.Int64(); j > 0 {
+			time.Sleep(time.Duration(j) * time.Millisecond)
+		}
+	}
 
 	_ = client.SetDeadline(time.Now().Add(connTimeout))
 
@@ -206,6 +219,10 @@ func pickInstance(instCount int, wantParanoid bool) int {
 }
 
 // Rotation manager: per-instance thresholds from instRotateConns / instRotateSecs.
+// For stable tier, instRotateSecs has already been clamped to ≤ 3600s in config,
+// so no stable instance can live longer than one hour without being marked for rotation.
+// Once draining, as soon as active == 0, we restart — this also handles the
+// "when all connections stopped" case.
 func manageRotations(ctx context.Context, insts []*config.Instance) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()

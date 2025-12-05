@@ -43,6 +43,9 @@ type Config struct {
 	ParanoidRotateConns         int
 	ParanoidRotateSeconds       int
 	ParanoidTrafficPercent      int // 0–100
+
+	// Extra anti-fingerprint: per-connection SOCKS jitter
+	SocksJitterMaxMs int
 }
 
 type Instance struct {
@@ -81,6 +84,8 @@ func Load() *Config {
 
 		DNSMaxConns:        getInt("TORGO_DNS_MAX_CONNS", 256, 4096),
 		DNSMaxConnsPerInst: getInt("TORGO_DNS_MAX_PER_INST", 64, 1024),
+
+		SocksJitterMaxMs: getInt("TORGO_SOCKS_JITTER_MS_MAX", 0, 5000),
 	}
 
 	// default two-tier: half stable, half paranoid
@@ -94,10 +99,20 @@ func Load() *Config {
 	// tier defaults derived from global
 	c.StableMaxConnsPerInstance = getInt("TORGO_STABLE_MAX_CONNS",
 		max(c.MaxConnsPerInstance*2, 64), 8192)
+
+	// raw stable rotate seconds (could be > 1h from env, we clamp next)
+	rawStableRotateSecs := getInt("TORGO_STABLE_ROTATE_SECS",
+		max(c.RotateAfterSeconds*4, 3600), 7*24*3600)
+	if rawStableRotateSecs > 3600 {
+		rawStableRotateSecs = 3600 // hard cap at 1 hour
+	}
+	if rawStableRotateSecs <= 0 {
+		rawStableRotateSecs = 3600
+	}
+	c.StableRotateSeconds = rawStableRotateSecs
+
 	c.StableRotateConns = getInt("TORGO_STABLE_ROTATE_CONNS",
 		max(c.RotateAfterConns*4, 256), 5_000_000)
-	c.StableRotateSeconds = getInt("TORGO_STABLE_ROTATE_SECS",
-		max(c.RotateAfterSeconds*4, 3600), 7*24*3600)
 
 	c.ParanoidMaxConnsPerInstance = getInt("TORGO_PARANOID_MAX_CONNS",
 		max(16, c.MaxConnsPerInstance/2), 2048)
@@ -128,6 +143,7 @@ func Load() *Config {
 		"paranoidRotateConns", c.ParanoidRotateConns,
 		"paranoidRotateSeconds", c.ParanoidRotateSeconds,
 		"paranoidTrafficPercent", c.ParanoidTrafficPercent,
+		"socksJitterMaxMs", c.SocksJitterMaxMs,
 	)
 
 	return c
@@ -268,7 +284,6 @@ func itoaQuick(n int) string {
 		n /= 10
 	}
 	i--
-	// n is now 0–9
 	buf[i] = byte('0' + n)
 	return string(buf[i:])
 }
