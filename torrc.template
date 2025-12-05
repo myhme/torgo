@@ -18,9 +18,15 @@ VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
-########## Local ports (torgo connects here on configured bind addr) ##########
-# __SOCKSPORT__ will be substituted to "<bindaddr>:<port>"
+########## Local ports (torgo connects here on 127.0.0.1) ##########
+# The template variable __SOCKSPORT__ is substituted by the program.
+# Keep the Isolate* flags — they greatly reduce cross-stream linkability.
 SocksPort __SOCKSPORT__ IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
+# Reasonable SOCKS timeouts so interactive browsing (pages, websockets)
+# doesn't break too quickly while still avoiding long-lived cleartext connections.
+SocksTimeout 300
+KeepalivePeriod 20
+
 DNSPort __DNSPORT__ AutomapHostsOnResolve 1
 
 ########## BLINDED CONTROL SURFACE ##########
@@ -28,7 +34,6 @@ DNSPort __DNSPORT__ AutomapHostsOnResolve 1
 # If you ever see ControlPort or CookieAuthentication enabled here, something is wrong.
 UseEntryGuards 0
 NumEntryGuards 0
-CookieAuthentication 0
 
 ########## Circuit / timeout behavior (very aggressive) ##########
 MaxCircuitDirtiness 55
@@ -74,16 +79,6 @@ PublishServerDescriptor 0
 PublishHidServDescriptors 0
 GeoIPFile ""
 GeoIPv6File ""
-
-########## SOCKS UX / privacy notes ##########
-# - If you bind SOCKS to 0.0.0.0 for ease of local browsing, be aware this
-#   increases the attack surface (other local containers / hosts can connect).
-# - The template substitutes __SOCKSPORT__ to "<bindaddr>:<port>" so set
-#   COMMON_SOCKS_BIND_ADDR to control where Tor listens for SOCKS/DNS.
-# - Per-connection isolation options above (IsolateClientAddr/Protocol/etc.)
-#   provide good fingerprint resistance for multi-client usage.
-# - If you want maximum privacy, bind to 127.0.0.1 and use an authenticated
-#   SOCKS proxy on the host or a separate sidecar to control access.
 
 ########## Extra override hook (for experiments only) ##########
 __EXTRA_TOR_OPTIONS__
