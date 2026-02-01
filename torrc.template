@@ -24,8 +24,6 @@ DNSPort {{.DNSPORT}}
 UseEntryGuards 1
 # Pin to 1 Guard to reduce surface area (VPN-like behavior)
 NumEntryGuards 1
-# Prevent Downgrade Attacks on Guard connection
-ClientRejectOldConsensus 1
 
 ########## Circuit / timeout behavior ##########
 # Slower rotation blends in better (Standard 10 mins)
