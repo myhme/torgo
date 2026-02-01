@@ -7,7 +7,7 @@ ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.23
 ARG APP_NAME=torgo
 
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
+FROM golang:${GO_VERSION}-alpine AS builder
 
 ARG APP_NAME
 ARG TARGETOS
