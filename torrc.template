@@ -1,7 +1,8 @@
 # === 2026 PRIVACY HARDENED TOR (ANTI-FINGERPRINT) ===
+# Updated: Cleaned deprecated options and redundant defaults
 
 ########## Client-only, diskless ##########
-ClientOnly 1
+# ClientOnly is default behavior, removed redundant flag
 AvoidDiskWrites 1
 SafeLogging 1
 Log warn stdout
@@ -15,15 +16,17 @@ AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
 ########## Local ports ##########
+# Intense isolation to prevent stream correlation
 SocksPort {{.SOCKSPORT}} IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
 SocksTimeout 300
 KeepalivePeriod 20
 DNSPort {{.DNSPORT}}
 
 ########## BLINDED CONTROL SURFACE ##########
-UseEntryGuards 1
+# UseEntryGuards 1 is default, removed redundant flag
 # Pin to 1 Guard to reduce surface area (VPN-like behavior)
 NumEntryGuards 1
+# DEPRECATED REMOVED: ClientRejectOldConsensus 1
 
 ########## Circuit / timeout behavior ##########
 # Slower rotation blends in better (Standard 10 mins)
@@ -33,14 +36,13 @@ CircuitBuildTimeout 10
 CircuitStreamTimeout 30
 
 ########## Anti-Fingerprinting / Padding ##########
-# Dummy traffic to hide request size
-CircuitPadding 1
-ConnectionPadding 1
+# CircuitPadding/ConnectionPadding are enabled by default (lines removed)
 ReducedConnectionPadding 0
 # Randomize internal heartbeat to confuse timing algorithms
 HeartbeatPeriod 60 minutes
 
 ########## Routing policy (NO 5 EYES) ##########
+# NOTE: If bootstrap hangs, comment out StrictNodes
 StrictNodes 1
 
 # 1. ALLOWED EXITS: Privacy-friendly jurisdictions
@@ -55,7 +57,7 @@ ExcludeExitNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr
 ########## Network & address sanity ##########
 ClientUseIPv6 0
 EnforceDistinctSubnets 1
-FascistFirewall 1
+# DEPRECATED REMOVED: FascistFirewall 1
 # Only allow standard HTTPS/Tor ports (443/9000/9001)
 ReachableAddresses *:443,*:9000,*:9001
 
