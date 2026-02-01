@@ -83,4 +83,4 @@ DisableDebuggerAttachment 1
 WarnPlaintextPorts 80,21,23,109,110,143
 
 # SECURITY: Restrict Tor to only read/write its own data and nothing else.
-Sandbox 1
+# Sandbox 1

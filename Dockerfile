@@ -1,28 +1,26 @@
 # syntax=docker/dockerfile:1.7
 
 ##############################################
-# Builder stage (Standard Static)
+# Builder stage (Hardened + Static PIE)
 ##############################################
 ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.23
 ARG APP_NAME=torgo
 
-# RESTORED: --platform=$BUILDPLATFORM
-# This makes the build FAST (uses your native CPU) and RELIABLE.
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
+# REMOVE --platform=$BUILDPLATFORM to ensure we run native gcc on each arch (via QEMU)
+FROM golang:${GO_VERSION}-alpine AS builder
 
 ARG APP_NAME
 ARG TARGETOS
 ARG TARGETARCH
 
-# CRITICAL: Disable CGO.
-# This ensures a 100% static binary that runs on any Linux (Alpine, Scratch, Debian).
-ENV CGO_ENABLED=0 \
-    GOOS=${TARGETOS} \
+# We set CGO_ENABLED=1 explicitly for the build to allow external linking.
+# We will use flags to force it to be static anyway.
+ENV GOOS=${TARGETOS} \
     GOARCH=${TARGETARCH}
 
-# Removed 'gcc' and 'musl-dev' since we don't need external linking anymore.
-RUN apk add --no-cache git
+# Install build tools required for static linking with PIE
+RUN apk add --no-cache git gcc musl-dev
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -30,13 +28,14 @@ RUN go mod download
 
 COPY . .
 
-# SECURITY HARDENING: Standard Static Build
-# -trimpath: Removes file system paths (privacy).
-# -ldflags "-s -w": Strips debug symbols (smaller, harder to reverse).
-# REMOVED: -buildmode=pie (This was the cause of the "no such file" and build errors)
-RUN go build \
+# SECURITY HARDENING: Static PIE Build
+# 1. CGO_ENABLED=1: Required for -linkmode external
+# 2. -linkmode external: Uses GCC to handle ASLR/PIE
+# 3. -extldflags "-static": Forces GCC to bundle everything statically (no dynamic libs)
+RUN CGO_ENABLED=1 go build \
       -trimpath \
-      -ldflags="-s -w -buildid=" \
+      -buildmode=pie \
+      -ldflags='-s -w -linkmode external -extldflags "-static" -buildid=' \
       -o "/${APP_NAME}" "./cmd/${APP_NAME}"
 
 ##############################################
@@ -53,7 +52,7 @@ RUN apk add --no-cache \
       libcap \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
 
-# 2. Copy the Static Binary
+# 2. Copy the Hardened Static Binary
 COPY --from=builder "/${APP_NAME}" "/usr/local/bin/${APP_NAME}"
 
 # 3. Setup Zero-Trust Environment
