@@ -114,7 +114,7 @@ func handleDNS(client net.Conn, insts []*config.Instance) {
 
 	chosen = insts[chosenIdx]
 
-	// FIX: Use fmt.Sprintf to avoid null-byte issues
+	// FIX: Use fmt.Sprintf
 	addr := fmt.Sprintf("127.0.0.1:%d", chosen.DNSPort)
 
 	torDNS, err := net.Dial("tcp", addr)
@@ -130,7 +130,6 @@ func handleDNS(client net.Conn, insts []*config.Instance) {
 }
 
 func boundedCopy(dst net.Conn, src net.Conn) {
-	// 4KB buffer is plenty for DNS packets (usually <512 bytes, max 65KB)
 	buf := make([]byte, 4096)
 	for {
 		nr, er := src.Read(buf)

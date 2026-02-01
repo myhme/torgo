@@ -35,7 +35,6 @@ var (
 	connTimeout         = 15 * time.Minute
 )
 
-// Start binds SOCKS and dispatches connections across a two-tier pool.
 func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 	instCount := len(insts)
 	if instCount == 0 {
@@ -46,12 +45,10 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		instCount = 32
 	}
 
-	// Pull globals
 	if cfg.MaxTotalConns > 0 {
 		maxTotalConns = int32(cfg.MaxTotalConns)
 	}
 
-	// Tier layout
 	stableCount := cfg.StableInstances
 	if stableCount > instCount {
 		stableCount = instCount
@@ -99,7 +96,6 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		"socksJitterMaxMs", cfg.SocksJitterMaxMs,
 	)
 
-	// background rotation manager
 	go manageRotations(ctx, insts)
 
 	for {
@@ -120,10 +116,8 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 	defer client.Close()
 	defer atomic.AddUint32(&totalConns, ^uint32(0))
 
-	// SECURITY FIX: Set deadline IMMEDIATELY to prevent Slowloris attacks
 	_ = client.SetDeadline(time.Now().Add(connTimeout))
 
-	// Optional: timing jitter
 	if cfg.SocksJitterMaxMs > 0 {
 		jMax := cfg.SocksJitterMaxMs
 		if jMax > 5000 {
@@ -168,14 +162,11 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 	inst := insts[chosenIdx]
 	atomic.AddUint64(&instanceTotal[chosenIdx], 1)
 
-	// BUG FIX: Use standard fmt.Sprintf.
-	// The previous manual byte manipulation created strings with null bytes ("127.0.0.1:9050\x00")
-	// which caused net.Dial to fail instantly.
+	// FIX: Use standard string formatting to avoid null bytes
 	addr := fmt.Sprintf("127.0.0.1:%d", inst.SocksPort)
 
 	tor, err := net.Dial("tcp", addr)
 	if err != nil {
-		// If we can't connect to Tor (it's restarting or busy), close client.
 		return
 	}
 	defer tor.Close()
