@@ -4,14 +4,8 @@
 ClientOnly 1
 AvoidDiskWrites 1
 SafeLogging 1
-
-# 2. Privacy Level: 'warn' hides all circuit builds, handshakes, and connections.
-#    It will ONLY print if Tor crashes or has a critical error.
 Log warn stdout
-
-# 3. Disable Protocol Warnings: Hides minor protocol errors that might leak detail
 ProtocolWarnings 0
-
 PidFile /dev/null
 DataDirectory {{.DATADIR}}
 
@@ -21,49 +15,42 @@ AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
 ########## Local ports ##########
-# SOCKS Port with strict isolation to prevent cross-stream identity linking
 SocksPort {{.SOCKSPORT}} IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
 SocksTimeout 300
 KeepalivePeriod 20
-
-# DNS Port
 DNSPort {{.DNSPORT}}
 
 ########## BLINDED CONTROL SURFACE ##########
 UseEntryGuards 1
-# HARDENING: Pin to 1 Guard to reduce surface area.
-# Connecting to fewer entry nodes makes your traffic look like a stable VPN tunnel
-# rather than a suspicious "spiderweb" of connections.
+# Pin to 1 Guard to reduce surface area (VPN-like behavior)
 NumEntryGuards 1
+# Prevent Downgrade Attacks on Guard connection
+ClientRejectOldConsensus 1
 
 ########## Circuit / timeout behavior ##########
-# HARDENING: Slower rotation prevents "machine gun" traffic patterns.
-# Rotating too fast (e.g. 15s) creates a distinct heartbeat that machine learning
-# can easily fingerprint. 10 minutes (600s) is standard and blends in better.
+# Slower rotation blends in better (Standard 10 mins)
 MaxCircuitDirtiness 600
 NewCircuitPeriod 120
-
-# Fail fast if a node is dead
 CircuitBuildTimeout 10
 CircuitStreamTimeout 30
 
 ########## Anti-Fingerprinting / Padding ##########
-# Adds dummy traffic to hide the size/timing of your requests
+# Dummy traffic to hide request size
 CircuitPadding 1
 ConnectionPadding 1
 ReducedConnectionPadding 0
+# Randomize internal heartbeat to confuse timing algorithms
+HeartbeatPeriod 60 minutes
 
 ########## Routing policy (NO 5 EYES) ##########
 StrictNodes 1
 
-# 1. ALLOWED EXITS: Only privacy-friendly jurisdictions
-# ch=Switzerland, is=Iceland, se=Sweden, nl=Netherlands, no=Norway, 
+# 1. ALLOWED EXITS: Privacy-friendly jurisdictions
+# ch=Switzerland, is=Iceland, se=Sweden, nl=Netherlands, no=Norway,
 # ro=Romania, pa=Panama, sc=Seychelles, sg=Singapore
 ExitNodes {ch},{is},{se},{nl},{no},{ro},{pa},{sc},{sg}
 
 # 2. EXCLUDED NODES: Block 5-Eyes + Hostile/Unsafe Nations
-# 5 Eyes: us, ca, gb, au, nz
-# Hostile/Censored: ru, cn, ir, kp, sy, ve, by, tr, in, br, sa
 ExcludeNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr},{in},{br},{sa}
 ExcludeExitNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr},{in},{br},{sa}
 
@@ -71,18 +58,14 @@ ExcludeExitNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr
 ClientUseIPv6 0
 EnforceDistinctSubnets 1
 FascistFirewall 1
-
-# Only allow connections to guards on HTTPS (443) or Tor (9000/9001) ports
-# Block port 80 to prevent accidental plaintext guard discovery
+# Only allow standard HTTPS/Tor ports (443/9000/9001)
 ReachableAddresses *:443,*:9000,*:9001
 
 ########## Local hardening ##########
 DisableAllSwap 1
 HardwareAccel 0
 DisableDebuggerAttachment 1
-
-# Warn if application tries to use plaintext HTTP (80) or other insecure protocols
 WarnPlaintextPorts 80,21,23,109,110,143
 
-# SECURITY: Restrict Tor to only read/write its own data and nothing else.
+# Sandbox disabled (Docker Hardening replaces this)
 # Sandbox 1
