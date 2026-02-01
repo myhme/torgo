@@ -66,6 +66,14 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 }
 
 func handleDNS(client net.Conn, insts []*config.Instance) {
+	// 1. PANIC RECOVERY
+	// Prevent dns crashes from affecting the main process
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("dns panic recovered", "err", r)
+		}
+	}()
+
 	defer client.Close()
 	defer atomic.AddUint32(&totalDNSConns, ^uint32(0))
 
@@ -130,7 +138,16 @@ func handleDNS(client net.Conn, insts []*config.Instance) {
 }
 
 func boundedCopy(dst net.Conn, src net.Conn) {
+	// 2. SECURE MEMORY (Smaller 4KB buffer for DNS)
 	buf := make([]byte, 4096)
+
+	// 3. IMMEDIATE WIPE (Anti-Forensics)
+	defer func() {
+		for i := range buf {
+			buf[i] = 0
+		}
+	}()
+
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {

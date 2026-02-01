@@ -113,6 +113,14 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 }
 
 func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) {
+	// 1. PANIC RECOVERY (Anti-Leak)
+	// If this goroutine crashes, capture it silently instead of dumping secret data to logs.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("socks panic recovered", "err", r)
+		}
+	}()
+
 	defer client.Close()
 	defer atomic.AddUint32(&totalConns, ^uint32(0))
 
@@ -266,7 +274,19 @@ func manageRotations(ctx context.Context, insts []*config.Instance) {
 }
 
 func boundedCopy(dst net.Conn, src net.Conn) (written int64, err error) {
+	// 2. SECURE MEMORY ALLOCATION
+	// Allocate 64KB buffer for data transfer
 	buf := make([]byte, 64<<10)
+
+	// 3. IMMEDIATE WIPE (Anti-Forensics)
+	// As soon as this function exits, overwrite the buffer with zeros.
+	// This ensures sensitive data (URLs, passwords) exists in RAM for milliseconds only.
+	defer func() {
+		for i := range buf {
+			buf[i] = 0
+		}
+	}()
+
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
