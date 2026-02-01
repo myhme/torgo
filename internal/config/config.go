@@ -170,6 +170,11 @@ func (i *Instance) Start() error {
 	// Execute Tor reading config from stdin
 	cmd := exec.Command("tor", "-f", "/dev/stdin")
 	cmd.Stdin = strings.NewReader(b.String())
+	
+	// CRITICAL FIX: Connect Tor output to Docker logs so we can see why it fails
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
 	cmd.Dir = i.DataDir
 	
 	// Minimal environment
