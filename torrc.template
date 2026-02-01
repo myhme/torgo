@@ -1,56 +1,60 @@
 # === 2026 PRIVACY HARDENED TOR ===
 
+########## Client-only, diskless ##########
 ClientOnly 1
 AvoidDiskWrites 1
 SafeLogging 1
+
+# Log only to stdout/stderr (container logs), never to disk
 Log notice stdout
 Log warn stderr
 Log err stderr
 
 PidFile /dev/null
-DataDirectory __DATADIR__
+DataDirectory {{.DATADIR}}
 
-# Virtual Addressing
+########## Virtual addressing / .onion resolution ##########
 VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
-# Connections
-SocksPort __SOCKSPORT__ IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
+########## Local ports (torgo connects here on 127.0.0.1) ##########
+# The template variable is substituted by the program.
+# Keep the Isolate* flags — they greatly reduce cross-stream linkability.
+SocksPort {{.SOCKSPORT}} IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
+
+# Reasonable SOCKS timeouts so interactive browsing (pages, websockets)
+# doesn't break too quickly while still avoiding long-lived cleartext connections.
 SocksTimeout 300
 KeepalivePeriod 20
-DNSPort __DNSPORT__ AutomapHostsOnResolve 1
 
-# Blinded Control
-UseEntryGuards 1  # Vital for anonymity (protection against rotation attacks)
-NumEntryGuards 3  # Standard defaults are safest
+DNSPort {{.DNSPORT}} AutomapHostsOnResolve 1
 
-# Circuit Hardening
+########## BLINDED CONTROL SURFACE ##########
+# No ControlPort, no cookie auth – torgo is deliberately "blind".
+# If you ever see ControlPort or CookieAuthentication enabled here, something is wrong.
+UseEntryGuards 1
+NumEntryGuards 3
+
+########## Circuit / timeout behavior (very aggressive) ##########
 MaxCircuitDirtiness 60
 NewCircuitPeriod 15
 CircuitBuildTimeout 10
 CircuitStreamTimeout 30
 
-# Anti-Fingerprinting (Paranoia Mode)
-# Enabling padding makes the traffic look MORE like standard Tor traffic.
-# Disabling it (0) is unique and fingerprintable.
-CircuitPadding 1
-ReducedCircuitPadding 0
-ConnectionPadding 1
-
-# Routing
+########## Routing policy ##########
 StrictNodes 1
 ExitNodes {us}{ca}{gb}{de}{nl}{se}{ch}{is}{dk}{no}
 ExcludeNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{tr}{in}{br}{sa}
 ExcludeExitNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{tr}{in}{br}{sa}
 
-# Network
+########## Network & address sanity ##########
 ClientUseIPv6 0
 EnforceDistinctSubnets 1
 FascistFirewall 1
 ReachableAddresses *:80,*:443
 
-# Local Hardening
+########## Local hardening ##########
 DisableAllSwap 1
 HardwareAccel 0
 DisableDebuggerAttachment 1
