@@ -81,3 +81,6 @@ DisableDebuggerAttachment 1
 
 # Warn if application tries to use plaintext HTTP (80) or other insecure protocols
 WarnPlaintextPorts 80,21,23,109,110,143
+
+# SECURITY: Restrict Tor to only read/write its own data and nothing else.
+Sandbox 1
