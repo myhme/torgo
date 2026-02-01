@@ -1,102 +1,83 @@
-version: "3.9"
-
 services:
-  torgo:
-    # You can either build locally or pull from GHCR.
-    # For local dev:
-    build: .
-    # For pulling the published image instead, comment the build and uncomment:
-    # image: ghcr.io/myhme/torgo:latest
-
-    container_name: torgo-zt
-    restart: unless-stopped
-
-    # Run as tor user (matches /etc/passwd from Alpine tor)
-    user: "106:112"
-
+proxy:
+    image: ghcr.io/myhme/torgo:main
+    container_name: proxy
+    restart: always
+    profiles:
+      - "vpn-proxy"
+      - "mediaserver"
+    labels:
+      - "com.priority=15"
+      - "homepage.group=Proxies & Tunnels"
+      - "homepage.name=TorGo Proxy"
+      - "homepage.icon=tor.png"
+      - "homepage.description=Tor Proxy Manager"
+    # Run as unprivileged tor user (UID 100:GID 101 is standard for Alpine tor)
+    user: "100:101"
     privileged: false
     read_only: true
-    network_mode: host
-
-    # All writable paths are tmpfs → RAM only (no persistence)
-    tmpfs:
-      - /var/lib/tor-temp:size=512m,mode=700,noexec,nosuid,nodev
-      - /var/lib/tor:size=256m,mode=700,noexec,nosuid,nodev
-      - /run:size=32m,noexec,nosuid,nodev
-      - /tmp:size=64m,noexec,nosuid,nodev
-
-    volumes:
-      - ./torrc.template:/etc/tor/torrc.template:ro
-      - ./seccomp.json:/etc/torgo/seccomp.json:ro
-
-    ports:
-      - "9150:9150/tcp"   # SOCKS
-      - "5353:5353/udp"   # DNS
-
+    depends_on:
+      adguardhome_essential:
+        condition: service_healthy
+    # Drop ALL capabilities to ensure Zero Trust / Least Privilege
     cap_drop:
       - ALL
-
-    # NOTE: SYS_ADMIN is only needed if TORGO_ENABLE_LUKS_RAM=1
-    # (for cryptsetup + mount/umount of the encrypted RAM volume).
-    # If you ever disable LUKS, you can drop SYS_ADMIN as well.
+    # Only minimal capabilities retained
     cap_add:
-      - IPC_LOCK    # secmem: mlockall
-      - SYS_ADMIN   # cryptsetup + mount/umount for LUKS RAM
-      - SYS_CHROOT  # some cryptsetup paths
-
+      - IPC_LOCK    # Required for SECMEM_REQUIRE_MLOCK=true (prevent swap)
+      # SYS_ADMIN and SYS_CHROOT are NO LONGER REQUIRED (LUKS removed)
+    ulimits:
+      nofile: 65536
+      memlock:
+        soft: -1
+        hard: -1
+      core: 0
+    # All writable paths are tmpfs → RAM only (no persistence, no disk trace)
+    # All writable paths are tmpfs → RAM only (no persistence, no disk trace)
+    # ADDED: uid=100,gid=101 to ensure the non-root user can write to them
+    tmpfs:
+      - /var/lib/tor-temp:size=512m,mode=700,uid=100,gid=101,noexec,nosuid,nodev
+      - /var/lib/tor:size=256m,mode=700,uid=100,gid=101,noexec,nosuid,nodev
+      - /run:size=32m,uid=100,gid=101,noexec,nosuid,nodev
+      - /tmp:size=64m,uid=100,gid=101,noexec,nosuid,nodev
     security_opt:
       - no-new-privileges:true
-      - seccomp=/etc/torgo/seccomp.json
+      # Ensure these files exist on your HOST at these paths:
+      - seccomp=/opt/docker-seccomp/torgo-seccomp.json
       - apparmor=docker-tor-hardened
-
-    ulimits:
-      memlock: -1
-      core: 0
-
     environment:
       # Hard memory rules
-      SECMEM_REQUIRE_MLOCK: "true"
-
+      - SECMEM_REQUIRE_MLOCK=true
       # Core pool sizing
-      TOR_INSTANCES: "8"
-
-      # Zero-trust disk: LUKS over /dev/zero + tmpfs mount
-      TORGO_ENABLE_LUKS_RAM: "1"
-
-      # Blind Tor control (no ControlPort in template)
-      TORGO_BLIND_CONTROL: "1"
-
-      # Bind addresses / ports
-      COMMON_SOCKS_BIND_ADDR: "0.0.0.0"
-      COMMON_SOCKS_PROXY_PORT: "9150"
-      COMMON_DNS_PROXY_PORT: "5353"
-
+      - TOR_INSTANCES=8
+      # Privacy & Control
+      - TORGO_BLIND_CONTROL=1
+      # Bind addresses / ports (inside container)
+      - COMMON_SOCKS_BIND_ADDR=0.0.0.0
+      - COMMON_SOCKS_PROXY_PORT=9150
+      - COMMON_DNS_PROXY_PORT=53
       # Connection limits (overall + per instance)
-      TORGO_MAX_CONNS_PER_INSTANCE: "64"   # per-instance cap
-      TORGO_MAX_TOTAL_CONNS: "512"         # global cap
-
-      # Rotation policy (max chaos without killing UX)
-      # Rotate instance when it has handled this many conns…
-      TORGO_ROTATE_CONNS: "64"
-      # …or has been alive this many seconds (whichever comes first)
-      TORGO_ROTATE_SECS: "3600"            # 1 hour max lifetime
-
+      - TORGO_MAX_CONNS_PER_INSTANCE=64   # per-instance cap
+      - TORGO_MAX_TOTAL_CONNS=512         # global cap
+      # Rotation policy (Chaos vs Stability)
+      - TORGO_ROTATE_CONNS=64
+      - TORGO_ROTATE_SECS=3600            # 1 hour max lifetime
       # DNS concurrency
-      TORGO_DNS_MAX_CONNS: "256"
-      TORGO_DNS_MAX_PER_INST: "64"
-
-      # Optional: timing jitter to de-sync fingerprints (0–X ms per conn)
-      TORGO_SOCKS_JITTER_MS_MAX: "40"      # tweak up/down as you like
-
-    # Healthcheck uses the torgo binary itself (no bash/timeout dependency)
+      - TORGO_DNS_MAX_CONNS=256
+      - TORGO_DNS_MAX_PER_INST=64
+      # Timing jitter (Anti-fingerprinting)
+      - TORGO_SOCKS_JITTER_MS_MAX=40
+    networks:
+      public:
+        ipv4_address: 10.10.1.50
+    # Healthcheck uses the internal Go binary check
     healthcheck:
       test: ["CMD", "/usr/local/bin/torgo", "--selfcheck"]
       interval: 30s
       timeout: 5s
       retries: 5
-
+      start_period: 20s
     logging:
-      driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
