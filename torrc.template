@@ -1,11 +1,8 @@
-# === 2025 ZERO-TRUST BLINDED TOR ===
+# === 2026 PRIVACY HARDENED TOR ===
 
-########## Client-only, diskless ##########
 ClientOnly 1
 AvoidDiskWrites 1
 SafeLogging 1
-
-# Log only to stdout/stderr (container logs), never to disk
 Log notice stdout
 Log warn stderr
 Log err stderr
@@ -13,72 +10,48 @@ Log err stderr
 PidFile /dev/null
 DataDirectory __DATADIR__
 
-########## Virtual addressing / .onion resolution ##########
+# Virtual Addressing
 VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
-########## Local ports (torgo connects here on 127.0.0.1) ##########
-# The template variable __SOCKSPORT__ is substituted by the program.
-# Keep the Isolate* flags — they greatly reduce cross-stream linkability.
+# Connections
 SocksPort __SOCKSPORT__ IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
-# Reasonable SOCKS timeouts so interactive browsing (pages, websockets)
-# doesn't break too quickly while still avoiding long-lived cleartext connections.
 SocksTimeout 300
 KeepalivePeriod 20
-
 DNSPort __DNSPORT__ AutomapHostsOnResolve 1
 
-########## BLINDED CONTROL SURFACE ##########
-# No ControlPort, no cookie auth – torgo is deliberately "blind".
-# If you ever see ControlPort or CookieAuthentication enabled here, something is wrong.
-UseEntryGuards 0
-NumEntryGuards 0
+# Blinded Control
+UseEntryGuards 1  # Vital for anonymity (protection against rotation attacks)
+NumEntryGuards 3  # Standard defaults are safest
 
-########## Circuit / timeout behavior (very aggressive) ##########
-MaxCircuitDirtiness 55
-NewCircuitPeriod 5
-CircuitBuildTimeout 7
-LearnCircuitBuildTimeout 0
+# Circuit Hardening
+MaxCircuitDirtiness 60
+NewCircuitPeriod 15
+CircuitBuildTimeout 10
 CircuitStreamTimeout 30
-SocksTimeout 120
-KeepalivePeriod 15
 
-########## Routing policy ##########
+# Anti-Fingerprinting (Paranoia Mode)
+# Enabling padding makes the traffic look MORE like standard Tor traffic.
+# Disabling it (0) is unique and fingerprintable.
+CircuitPadding 1
+ReducedCircuitPadding 0
+ConnectionPadding 1
+
+# Routing
 StrictNodes 1
-ExitNodes {us}{ca}{gb}{de}{nl}{no}{se}{fi}{ch}{is}{li}{lu}{dk}{at}{be}{fr}{jp}{au}{nz}
-ExcludeNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{hk}{tr}{il}{sg}{kr}{in}{br}{za}{ae}{qa}{sa}{id}{my}{th}{vn}{pk}{eg}{ma}{co}{ar}{cl}{pe}{bo}
-ExcludeExitNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{hk}{tr}{il}{sg}{kr}{in}{br}{za}{ae}{qa}{sa}
+ExitNodes {us}{ca}{gb}{de}{nl}{se}{ch}{is}{dk}{no}
+ExcludeNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{tr}{in}{br}{sa}
+ExcludeExitNodes {ru}{cn}{ir}{kp}{sy}{ve}{by}{tr}{in}{br}{sa}
 
-########## Network & address sanity ##########
+# Network
 ClientUseIPv6 0
 EnforceDistinctSubnets 1
 FascistFirewall 1
-ReachableAddresses *:9050-9059,*:9200-9299
+ReachableAddresses *:80,*:443
 
-########## Local hardening ##########
+# Local Hardening
 DisableAllSwap 1
 HardwareAccel 0
 DisableDebuggerAttachment 1
-AllowNonRFC953Hostnames 0
-OptimisticData 0
-ClientRejectInternalAddresses 1
-WarnPlaintextPorts 1,22,25,109,110,143,993,995,6667
-RejectPlaintextPorts 1,22,25,109,110,143,993,995,6667
-
-########## Padding / descriptors / GeoIP ##########
-CircuitPadding 0
-ReducedCircuitPadding 1
-ConnectionPadding 0
-FastFirstHopPK 1
-ExtendByEd25519ID 1
-UseMicrodescriptors 1
-
-# Don't publish any descriptors, and avoid GeoIP lookups/files
-PublishServerDescriptor 0
-PublishHidServDescriptors 0
-GeoIPFile ""
-GeoIPv6File ""
-
-########## Extra override hook (for experiments only) ##########
-__EXTRA_TOR_OPTIONS__
+WarnPlaintextPorts 23,109,110,143

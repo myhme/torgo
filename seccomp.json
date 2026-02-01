@@ -1,40 +1,34 @@
 {
   "defaultAction": "SCMP_ACT_ERRNO",
   "archMap": [
-    {
-      "architecture": "SCMP_ARCH_X86_64",
-      "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
-    }
+    { "architecture": "SCMP_ARCH_X86_64", "subArchitectures": ["SCMP_ARCH_X86"] },
+    { "architecture": "SCMP_ARCH_AARCH64" }
   ],
   "syscalls": [
     {
       "names": [
-        "read", "write", "openat", "close", "fstat", "stat", "lstat",
-        "poll", "lseek", "mmap", "mprotect", "munmap", "brk", "rt_sigaction",
-        "rt_sigprocmask", "ioctl", "pread64", "pwrite64", "access",
-        "pipe", "select", "sched_yield", "mremap", "msync", "mincore",
-        "madvise", "shmget", "shmat", "shmctl", "dup", "dup2", "socket",
-        "connect", "accept", "sendto", "recvfrom", "sendmsg", "recvmsg",
-        "shutdown", "bind", "listen", "getsockname", "getpeername",
-        "setsockopt", "getsockopt", "clone", "fork", "vfork", "execve",
-        "exit_group", "exit", "wait4", "kill", "tgkill", "getpid", "gettid",
-        "uname", "ptrace", "arch_prctl", "set_tid_address", "set_robust_list",
-        "prctl", "getcwd", "chdir", "fchdir", "chmod", "fchmod", "chown",
-        "fchown", "open", "mkdir", "rmdir", "unlink", "unlinkat", "rename",
-        "renameat", "statfs", "fstatfs", "getuid", "geteuid", "getgid",
-        "getegid", "setuid", "setgid", "setpgid", "getpgid", "getgroups",
-        "setgroups", "setresuid", "setresgid", "setrlimit", "getrlimit",
-        "sysinfo", "reboot", "nanosleep", "clock_gettime", "clock_getres",
-        "membarrier", "futex", "sched_getaffinity", "sched_setaffinity",
-        "capget", "capset", "rt_sigreturn", "sendfile"
-      ],
-      "action": "SCMP_ACT_ALLOW"
-    },
-    {
-      "names": [
-        "mount", "umount2", "pivot_root", "setns", "io_submit", "io_destroy",
-        "io_getevents", "io_setup", "fallocate", "mkdirat", "mknod",
-        "mknodat", "seccomp"
+        "accept", "accept4", "access", "arch_prctl", "bind", "brk", "capget", 
+        "capset", "chdir", "chmod", "clock_getres", "clock_gettime", 
+        "clone", "clone3", "close", "connect", "dup", "dup2", "dup3", 
+        "epoll_create", "epoll_create1", "epoll_ctl", "epoll_pwait", 
+        "epoll_wait", "execve", "exit", "exit_group", "faccessat", "fchdir", 
+        "fchmod", "fchown", "fcntl", "fstat", "fstatfs", "futex", "getcwd", 
+        "getdents64", "getegid", "geteuid", "getgid", "getpeername", "getpid", 
+        "getppid", "getrandom", "getresgid", "getresuid", "getrlimit", 
+        "getsockname", "getsockopt", "gettid", "gettimeofday", "getuid", 
+        "ioctl", "kill", "listen", "lseek", "madvise", "memfd_create", 
+        "mkdir", "mkdirat", "mlock", "mlockall", "mmap", "mprotect", "munmap", 
+        "munlock", "munlockall", "nanosleep", "newfstatat", "open", "openat", 
+        "pipe", "pipe2", "poll", "ppoll", "prctl", "pread64", "pselect6", 
+        "pwrite64", "read", "readlink", "readlinkat", "recvfrom", "recvmmsg", 
+        "recvmsg", "rename", "renameat", "restart_syscall", "rmdir", 
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sched_getaffinity", 
+        "sched_yield", "select", "sendfile", "sendmmsg", "sendmsg", "sendto", 
+        "set_robust_list", "set_tid_address", "setgid", "setgroups", 
+        "setitimer", "setpgid", "setrlimit", "setsockopt", "setuid", 
+        "shutdown", "sigaltstack", "socket", "socketpair", "stat", "statfs", 
+        "sysinfo", "tgkill", "tkill", "uname", "unlink", "unlinkat", "wait4", 
+        "write", "writev"
       ],
       "action": "SCMP_ACT_ALLOW"
     }

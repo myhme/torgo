@@ -1,75 +1,65 @@
 # syntax=docker/dockerfile:1.7
 
 ##############################################
-# Global build arguments
+# Builder stage
 ##############################################
 ARG GO_VERSION=1.25
-ARG ALPINE_VERSION=3.22
+ARG ALPINE_VERSION=3.21
 ARG APP_NAME=torgo
 
-##############################################
-# Builder stage (multi-arch, pure Go – no cgo)
-##############################################
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 
 ARG APP_NAME
 ARG TARGETOS
 ARG TARGETARCH
 
-# Use Go's built-in cross-compiler (no cgo → no external GCC/asm)
 ENV CGO_ENABLED=0 \
     GOOS=${TARGETOS} \
-    GOARCH=${TARGETARCH} \
-    GOMODCACHE=/tmp/go-cache
+    GOARCH=${TARGETARCH}
 
-# Only what we actually need: git for modules
-RUN apk add --no-cache \
-      git
+RUN apk add --no-cache git
 
 WORKDIR /src
-
-# Go module deps first (better layer cache)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the rest of the source
 COPY . .
 
-# Build per-arch torgo binary (no external strip)
 RUN go build \
       -trimpath \
-      -mod=readonly \
       -ldflags="-s -w -buildid=" \
       -o "/${APP_NAME}" "./cmd/${APP_NAME}"
 
 ##############################################
-# Final runtime stage (minimal Alpine)
+# Runtime stage
 ##############################################
 FROM alpine:${ALPINE_VERSION} AS final
 
 ARG APP_NAME
 
-# Tor + cryptsetup + required libs
+# Install Tor and minimal dependencies
+# Alpine 'tor' package creates user 'tor' (uid 100, gid 101 usually)
 RUN apk add --no-cache \
       tor \
-      cryptsetup \
+      libevent \
       libssl3 \
       libcrypto3 \
-      libevent \
       zlib \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
 
-# Copy built binary from builder (correct arch for each image)
+# Copy binary
 COPY --from=builder "/${APP_NAME}" "/usr/local/bin/${APP_NAME}"
 
-# Tor configuration template
+# Setup permissions for the non-root user
+# We create the directory structure needed for tmpfs mounts
+RUN mkdir -p /var/lib/tor-temp /etc/torgo \
+    && chown -R tor:tor /var/lib/tor-temp /etc/torgo /usr/local/bin/${APP_NAME}
+
+# Default config template
 COPY torrc.template /etc/tor/torrc.template
+RUN chmod 644 /etc/tor/torrc.template
 
-# IMPORTANT:
-# Do NOT drop to the tor user here – we want root inside container
-# so secmem can tweak /proc/self/coredump_filter and similar.
-# (Compose will still keep the container itself sandboxed.)
-
-# USER 106:112    # ← REMOVE or comment this out
+# Switch to non-root user for safety (though Compose should also enforce this)
+USER tor
 
 ENTRYPOINT ["/usr/local/bin/torgo"]

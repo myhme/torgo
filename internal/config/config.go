@@ -1,19 +1,15 @@
 package config
 
 import (
-	"bytes"
-	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"text/template"
-	"unsafe"
+	"time"
 )
 
 type Config struct {
@@ -21,8 +17,7 @@ type Config struct {
 	SocksBindAddr string
 	SocksPort     string
 	DNSPort       string
-	EnableLUKS    bool // per-instance RAM encryption
-	BlindControl  bool // no ControlPort/cookie
+	BlindControl  bool
 
 	// Global limits
 	MaxConnsPerInstance int
@@ -42,22 +37,17 @@ type Config struct {
 	ParanoidMaxConnsPerInstance int
 	ParanoidRotateConns         int
 	ParanoidRotateSeconds       int
-	ParanoidTrafficPercent      int // 0–100
+	ParanoidTrafficPercent      int
 
-	// Extra anti-fingerprint: per-connection SOCKS jitter
 	SocksJitterMaxMs int
 }
 
 type Instance struct {
-	ID         int
-	SocksPort  int
-	DNSPort    int
-	DataDir    string
-	mapperName string
-	cmd        *exec.Cmd
-
-	luksKey     []byte // ephemeral LUKS key (kernel holds real copy)
-	backingPath string // path to tmpfs backing file (if using LUKS)
+	ID        int
+	SocksPort int
+	DNSPort   int
+	DataDir   string
+	cmd       *exec.Cmd
 }
 
 var (
@@ -69,14 +59,12 @@ var (
 func Load() *Config {
 	n := getInt("TOR_INSTANCES", 8, 32)
 
-	// base values
 	c := &Config{
 		Instances:     n,
 		SocksBindAddr: getEnv("COMMON_SOCKS_BIND_ADDR", "0.0.0.0"),
 		SocksPort:     getEnv("COMMON_SOCKS_PROXY_PORT", "9150"),
 		DNSPort:       getEnv("COMMON_DNS_PROXY_PORT", "5353"),
-		EnableLUKS:    os.Getenv("TORGO_ENABLE_LUKS_RAM") == "1",
-		BlindControl:  os.Getenv("TORGO_BLIND_CONTROLP") == "1",
+		BlindControl:  os.Getenv("TORGO_BLIND_CONTROL") == "1",
 
 		MaxConnsPerInstance: getInt("TORGO_MAX_CONNS_PER_INSTANCE", 64, 4096),
 		MaxTotalConns:       getInt("TORGO_MAX_TOTAL_CONNS", 512, 65535),
@@ -128,7 +116,6 @@ func Load() *Config {
 
 	slog.Info("zero-trust config loaded",
 		"instances", c.Instances,
-		"luks", c.EnableLUKS,
 		"blind", c.BlindControl,
 		"maxConnsPerInstance", c.MaxConnsPerInstance,
 		"maxTotalConns", c.MaxTotalConns,
@@ -151,21 +138,12 @@ func Load() *Config {
 }
 
 func (i *Instance) Start() error {
-	// Per-instance dir (may be LUKS-backed)
-	i.DataDir = "/var/lib/tor/i" + itoaQuick(i.ID)
+	// Per-instance dir (standard tmpfs path)
+	i.DataDir = fmt.Sprintf("/var/lib/tor-temp/i%d", i.ID)
 
-	if cfg.EnableLUKS {
-		if err := i.setupLUKSRAM(); err != nil {
-			slog.Error("LUKS setup failed", "id", i.ID, "err", err)
-			return err
-		}
-	} else {
-		if err := os.MkdirAll(i.DataDir, 0o700); err != nil {
-			return err
-		}
-		if err := os.Chown(i.DataDir, 106, 112); err != nil {
-			return err
-		}
+	// Simple mkdir (we assume we are running as the correct user via Docker)
+	if err := os.MkdirAll(i.DataDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir data dir failed: %w", err)
 	}
 
 	once.Do(func() {
@@ -181,28 +159,23 @@ func (i *Instance) Start() error {
 	b.Grow(2048)
 
 	data := map[string]string{
-		"SOCKSPORT": "127.0.0.1:" + itoaQuick(i.SocksPort),
-		"DNSPORT":   "127.0.0.1:" + itoaQuick(i.DNSPort),
+		"SOCKSPORT": "127.0.0.1:" + strconv.Itoa(i.SocksPort),
+		"DNSPORT":   "127.0.0.1:" + strconv.Itoa(i.DNSPort),
 		"DATADIR":   i.DataDir,
 	}
 	if err := globalTmpl.Execute(&b, data); err != nil {
 		return fmt.Errorf("template exec failed: %w", err)
 	}
 
+	// Execute Tor reading config from stdin
 	cmd := exec.Command("tor", "-f", "/dev/stdin")
 	cmd.Stdin = strings.NewReader(b.String())
 	cmd.Dir = i.DataDir
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{Uid: 106, Gid: 112},
-		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID |
-			syscall.CLONE_NEWNS | syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET,
-		UidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: 106, Size: 1},
-		},
-		GidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: 112, Size: 1},
-		},
-		AmbientCaps: []uintptr{},
+	
+	// Minimal environment
+	cmd.Env = []string{
+		"HOME=" + i.DataDir,
+		"PATH=/usr/bin:/bin",
 	}
 
 	i.cmd = cmd
@@ -214,102 +187,23 @@ func (i *Instance) Start() error {
 	return nil
 }
 
-// LUKS over a tmpfs-backed file → encrypted RAM-only device, no disk trace.
-// Using a file in tmpfs is much more portable inside container runtimes than
-// opening /dev/zero directly.
-func (i *Instance) setupLUKSRAM() error {
-	// generate key
-	key := make([]byte, 64) // 512-bit key
-	if _, err := rand.Read(key); err != nil {
-		return fmt.Errorf("key gen failed: %w", err)
-	}
-	i.luksKey = key
-
-	mapper := fmt.Sprintf("torgo-enc-%d", i.ID)
-	i.mapperName = mapper
-
-	// Ensure tmpfs dir exists (compose binds /var/lib/tor-temp as tmpfs)
-	if err := os.MkdirAll("/var/lib/tor-temp", 0o755); err != nil {
-		return err
-	}
-
-	// backing file path (on tmpfs)
-	backing := filepath.Join("/var/lib/tor-temp", fmt.Sprintf("backing-i%d.img", i.ID))
-	i.backingPath = backing
-
-	// Create & truncate backing file (64MB default). This is fast on tmpfs.
-	f, err := os.OpenFile(backing, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("create backing file: %w", err)
-	}
-	if err := f.Truncate(64 << 20); err != nil { // 64 MB
-		f.Close()
-		return fmt.Errorf("truncate backing file: %w", err)
-	}
-	f.Close()
-
-	// cryptsetup open on the backing file (regular file works with cryptsetup)
-	cmd := exec.Command("cryptsetup", "open", "--type", "plain", "--key-file", "-",
-		"--cipher", "aes-xts-plain64", "--key-size", "512", backing, mapper)
-	cmd.Stdin = bytes.NewReader(key)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// attempt cleanup on failure
-		_ = os.Remove(backing)
-		return fmt.Errorf("cryptsetup open failed: %w (out: %s)", err, out)
-	}
-
-	dev := filepath.Join("/dev/mapper", mapper)
-
-	// Create an ext4 filesystem on the mapped device.
-	// Use -F to force in non-interactive contexts.
-	if out, err := exec.Command("mkfs.ext4", "-F", dev).CombinedOutput(); err != nil {
-		// Close mapper and remove file on failure
-		_ = exec.Command("cryptsetup", "close", mapper).Run()
-		_ = os.Remove(backing)
-		return fmt.Errorf("mkfs.ext4 failed: %w (out: %s)", err, out)
-	}
-
-	// Mount the mapped device
-	mountPoint := filepath.Join("/var/lib/tor-temp", fmt.Sprintf("i%d", i.ID))
-	if err := os.MkdirAll(mountPoint, 0o700); err != nil {
-		_ = exec.Command("cryptsetup", "close", mapper).Run()
-		_ = os.Remove(backing)
-		return err
-	}
-
-	if err := syscall.Mount(dev, mountPoint, "ext4",
-		syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC,
-		"discard,errors=remount-ro"); err != nil {
-		// cleanup on mount failure
-		_ = exec.Command("cryptsetup", "close", mapper).Run()
-		_ = os.Remove(backing)
-		return fmt.Errorf("LUKS mount failed: %w", err)
-	}
-
-	i.DataDir = mountPoint
-	if err := os.Chown(mountPoint, 106, 112); err != nil {
-		// not fatal for startup, but log
-		slog.Warn("chown failed for mountpoint", "path", mountPoint, "err", err)
-	}
-	return nil
-}
-
 func (i *Instance) Close() {
 	if i.cmd != nil && i.cmd.Process != nil {
-		_ = i.cmd.Process.Signal(syscall.SIGTERM)
-		_ = i.cmd.Wait()
+		// Try graceful signal first
+		_ = i.cmd.Process.Signal(os.Interrupt)
+		
+		// Wait with timeout
+		done := make(chan error, 1)
+		go func() { done <- i.cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			_ = i.cmd.Process.Kill()
+		}
 	}
-	if i.DataDir != "" {
-		_ = syscall.Unmount(i.DataDir, syscall.MNT_DETACH)
+	// Cleanup data dir files
+	if i.DataDir != "" && strings.HasPrefix(i.DataDir, "/var/lib/tor-temp") {
 		_ = os.RemoveAll(i.DataDir)
-	}
-	if i.mapperName != "" {
-		_ = exec.Command("cryptsetup", "close", i.mapperName).Run()
-	}
-	// Remove tmpfs-backed backing file if present.
-	if i.backingPath != "" {
-		_ = os.Remove(i.backingPath)
 	}
 }
 
@@ -322,19 +216,6 @@ func (i *Instance) CookiePath() string { return "" }
 
 // --- helpers ---
 
-func itoaQuick(n int) string {
-	buf := [8]byte{}
-	i := len(buf)
-	for n >= 10 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	i--
-	buf[i] = byte('0' + n)
-	return string(buf[i:])
-}
-
 func getEnv(key, def string) string {
 	if s := os.Getenv(key); s != "" {
 		return s
@@ -342,9 +223,9 @@ func getEnv(key, def string) string {
 	return def
 }
 
-func getInt(env string, def, max int) int {
+func getInt(env string, def, maxVal int) int {
 	if s := os.Getenv(env); s != "" {
-		if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= max {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= maxVal {
 			return v
 		}
 	}
@@ -367,7 +248,3 @@ func clamp(v, lo, hi int) int {
 	}
 	return v
 }
-
-// hide from naive forensics
-var _ = unsafe.Pointer(&globalTmpl)
-var _ = unsafe.Pointer(&cfg)

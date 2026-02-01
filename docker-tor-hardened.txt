@@ -1,0 +1,46 @@
+#include <tunables/global>
+
+profile docker-tor-hardened flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # Network access
+  network inet tcp,
+  network inet udp,
+
+  # Deny raw sockets (packet crafting)
+  deny network raw,
+
+  # Allow reading the binary and libraries
+  /usr/local/bin/torgo rpx,
+  /usr/bin/tor rpx,
+  /lib/** rm,
+  /usr/lib/** rm,
+
+  # Config files
+  /etc/tor/torrc.template r,
+  /etc/torgo/seccomp.json r,
+  /etc/resolv.conf r,
+  /etc/hosts r,
+  /etc/group r,
+  /etc/passwd r,
+
+  # Writable data areas (RAM disks)
+  # We strictly limit writing to the tmpfs mounts
+  /var/lib/tor-temp/** rw,
+  /run/** rw,
+  /tmp/** rw,
+  
+  # Deny writing to anything else
+  deny /usr/** w,
+  deny /etc/** w,
+  deny /boot/** w,
+  deny /sys/** w,
+  deny /proc/** w,
+  
+  # Capabilities (allow mlock for secmem)
+  capability ipc_lock,
+  
+  # Signal handling
+  signal,
+}
