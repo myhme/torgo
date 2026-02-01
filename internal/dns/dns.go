@@ -3,7 +3,7 @@ package dns
 import (
 	"context"
 	"crypto/rand"
-	"io"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net"
@@ -53,11 +53,14 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		if err != nil {
 			return
 		}
+
+		// Global limit check
 		if atomic.LoadUint32(&totalDNSConns) >= dnsMaxConns {
 			_ = c.Close()
 			continue
 		}
 		atomic.AddUint32(&totalDNSConns, 1)
+
 		go handleDNS(c, insts)
 	}
 }
@@ -66,24 +69,29 @@ func handleDNS(client net.Conn, insts []*config.Instance) {
 	defer client.Close()
 	defer atomic.AddUint32(&totalDNSConns, ^uint32(0))
 
-	client.SetDeadline(time.Now().Add(dnsConnTimeout))
+	// Security: Set deadline immediately
+	_ = client.SetDeadline(time.Now().Add(dnsConnTimeout))
 
 	instCount := len(insts)
 	if instCount == 0 {
 		return
 	}
-	instLen := big.NewInt(int64(instCount))
+	if instCount > 32 {
+		instCount = 32
+	}
 
-	// Smart LB: random start + least-connections
-	randIdx, _ := rand.Int(rand.Reader, instLen)
+	// Pick a random start index for load balancing
+	randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(instCount)))
 	start := int(randIdx.Int64())
 
 	var chosen *config.Instance
 	chosenIdx := -1
-	bestLoad := ^uint32(0)
+	var bestLoad uint32 = ^uint32(0)
 
-	for offset := 0; offset < instCount; offset++ {
-		idx := (start + offset) % instCount
+	// Simple least-loaded walk
+	for off := 0; off < instCount; off++ {
+		idx := (start + off) % instCount
+
 		load := atomic.LoadUint32(&perInstDNSConns[idx])
 		if load >= dnsMaxPerInstance {
 			continue
@@ -106,41 +114,24 @@ func handleDNS(client net.Conn, insts []*config.Instance) {
 
 	chosen = insts[chosenIdx]
 
-	// Zero-allocation target address (no "127.0.0.1:XXXX" on heap)
-	target := [16]byte{}
-	copy(target[:10], "127.0.0.1:")
-	itoa(target[10:], uint16(chosen.DNSPort))
+	// FIX: Use fmt.Sprintf to avoid null-byte issues
+	addr := fmt.Sprintf("127.0.0.1:%d", chosen.DNSPort)
 
-	torDNS, err := net.Dial("tcp", string(target[:]))
+	torDNS, err := net.Dial("tcp", addr)
 	if err != nil {
 		return
 	}
 	defer torDNS.Close()
-	torDNS.SetDeadline(time.Now().Add(dnsConnTimeout))
+	_ = torDNS.SetDeadline(time.Now().Add(dnsConnTimeout))
 
 	// DNS messages are tiny → use small fixed buffer + bounded copy
-	go boundedCopy(torDNS, client, 4096)
-	boundedCopy(client, torDNS, 4096)
+	go boundedCopy(torDNS, client)
+	boundedCopy(client, torDNS)
 }
 
-// Reuse the exact same fast itoa from config.go (zero allocation)
-func itoa(buf []byte, n uint16) {
-	if n == 0 {
-		buf[0] = '0'
-		return
-	}
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = '0' + byte(n%10)
-		n /= 10
-	}
-	copy(buf, buf[i:])
-}
-
-// boundedCopy with small buffer — perfect for DNS (max message 4096 bytes)
-func boundedCopy(dst net.Conn, src net.Conn, bufSize int) {
-	buf := make([]byte, bufSize)
+func boundedCopy(dst net.Conn, src net.Conn) {
+	// 4KB buffer is plenty for DNS packets (usually <512 bytes, max 65KB)
+	buf := make([]byte, 4096)
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
@@ -150,9 +141,6 @@ func boundedCopy(dst net.Conn, src net.Conn, bufSize int) {
 			}
 		}
 		if er != nil {
-			if er != io.EOF {
-				break
-			}
 			break
 		}
 	}

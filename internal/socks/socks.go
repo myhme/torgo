@@ -3,6 +3,7 @@ package socks
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -50,7 +51,7 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		maxTotalConns = int32(cfg.MaxTotalConns)
 	}
 
-	// Tier layout: first StableInstances are "stable", rest "paranoid"
+	// Tier layout
 	stableCount := cfg.StableInstances
 	if stableCount > instCount {
 		stableCount = instCount
@@ -76,7 +77,7 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 			}
 			instMaxConns[idx] = int32(stableMax)
 			instRotateConns[idx] = uint64(cfg.StableRotateConns)
-			instRotateSecs[idx] = int64(cfg.StableRotateSeconds) // ≤ 1 hour, enforced in config
+			instRotateSecs[idx] = int64(cfg.StableRotateSeconds)
 		}
 		atomic.StoreInt64(&instanceLastRestart[idx], now)
 	}
@@ -106,7 +107,6 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		if err != nil {
 			return
 		}
-		// Global connection limit check
 		if atomic.LoadUint32(&totalConns) >= uint32(maxTotalConns) {
 			_ = c.Close()
 			continue
@@ -120,17 +120,14 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 	defer client.Close()
 	defer atomic.AddUint32(&totalConns, ^uint32(0))
 
-	// SECURITY FIX: Set deadline IMMEDIATELY to prevent Slowloris attacks.
-	// If we sleep for jitter before setting this, an attacker can hold
-	// connections open indefinitely without sending data.
+	// SECURITY FIX: Set deadline IMMEDIATELY to prevent Slowloris attacks
 	_ = client.SetDeadline(time.Now().Add(connTimeout))
 
-	// Optional: timing jitter per connection (0..N ms)
-	// We sleep AFTER setting the deadline, so the clock is already ticking for the client.
+	// Optional: timing jitter
 	if cfg.SocksJitterMaxMs > 0 {
 		jMax := cfg.SocksJitterMaxMs
 		if jMax > 5000 {
-			jMax = 5000 // sanity cap at 5s
+			jMax = 5000
 		}
 		rnd, _ := rand.Int(rand.Reader, big.NewInt(int64(jMax+1)))
 		if j := rnd.Int64(); j > 0 {
@@ -146,7 +143,6 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 		instCount = 32
 	}
 
-	// Decide which tier to try first for this connection
 	useParanoid := false
 	if cfg.ParanoidTrafficPercent > 0 {
 		rnd, _ := rand.Int(rand.Reader, big.NewInt(100))
@@ -157,15 +153,12 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 
 	chosenIdx := pickInstance(instCount, useParanoid)
 	if chosenIdx < 0 {
-		// fallback: try other tier
 		chosenIdx = pickInstance(instCount, !useParanoid)
 	}
 	if chosenIdx < 0 {
-		// all busy / draining
 		return
 	}
 
-	// reserve slot
 	if atomic.AddUint32(&instanceConns[chosenIdx], 1) > uint32(instMaxConns[chosenIdx]) {
 		atomic.AddUint32(&instanceConns[chosenIdx], ^uint32(0))
 		return
@@ -175,14 +168,14 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 	inst := insts[chosenIdx]
 	atomic.AddUint64(&instanceTotal[chosenIdx], 1)
 
-	// "127.0.0.1:PORT" with no heap churn
-	target := [16]byte{}
-	copy(target[:], "127.0.0.1:")
-	itoaPort(target[10:], uint16(inst.SocksPort))
+	// BUG FIX: Use standard fmt.Sprintf.
+	// The previous manual byte manipulation created strings with null bytes ("127.0.0.1:9050\x00")
+	// which caused net.Dial to fail instantly.
+	addr := fmt.Sprintf("127.0.0.1:%d", inst.SocksPort)
 
-	tor, err := net.Dial("tcp", string(target[:]))
+	tor, err := net.Dial("tcp", addr)
 	if err != nil {
-		// Silently return on error to avoid leaking infrastructure state to client
+		// If we can't connect to Tor (it's restarting or busy), close client.
 		return
 	}
 	defer tor.Close()
@@ -192,9 +185,7 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 	boundedCopy(client, tor)
 }
 
-// pickInstance selects the least-loaded instance from the requested tier.
 func pickInstance(instCount int, wantParanoid bool) int {
-	// random start to avoid deterministic walking
 	randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(instCount)))
 	start := int(randIdx.Int64())
 
@@ -229,7 +220,6 @@ func pickInstance(instCount int, wantParanoid bool) int {
 	return bestIdx
 }
 
-// Rotation manager: per-instance thresholds from instRotateConns / instRotateSecs.
 func manageRotations(ctx context.Context, insts []*config.Instance) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -257,11 +247,9 @@ func manageRotations(ctx context.Context, insts []*config.Instance) {
 				rotSecs := instRotateSecs[idx]
 
 				if draining == 0 {
-					// should we start draining?
 					if (rotConns > 0 && total >= rotConns) ||
 						(rotSecs > 0 && last != 0 && now-last >= rotSecs) {
 						if atomic.CompareAndSwapUint32(&instanceDraining[idx], 0, 1) {
-							// Internal logging is safe and helpful for debugging
 							slog.Info("marking tor instance for rotation",
 								"id", inst.ID,
 								"tier", instTier[idx],
@@ -269,7 +257,6 @@ func manageRotations(ctx context.Context, insts []*config.Instance) {
 						}
 					}
 				} else {
-					// draining: wait until no active conns, then restart
 					if active == 0 {
 						slog.Info("rotating tor instance", "id", inst.ID)
 						if err := inst.Restart(); err != nil {
@@ -285,22 +272,6 @@ func manageRotations(ctx context.Context, insts []*config.Instance) {
 			}
 		}
 	}
-}
-
-// --- helpers ---
-
-func itoaPort(buf []byte, n uint16) {
-	if n == 0 {
-		buf[0] = '0'
-		return
-	}
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = '0' + byte(n%10)
-		n /= 10
-	}
-	copy(buf, buf[i:])
 }
 
 func boundedCopy(dst net.Conn, src net.Conn) (written int64, err error) {
