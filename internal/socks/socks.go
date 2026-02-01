@@ -5,8 +5,8 @@ import (
 	"crypto/rand"
 	"io"
 	"log/slog"
-	"math/big"
 	"math"
+	"math/big"
 	"net"
 	"sync/atomic"
 	"time"
@@ -106,6 +106,7 @@ func Start(ctx context.Context, insts []*config.Instance, cfg *config.Config) {
 		if err != nil {
 			return
 		}
+		// Global connection limit check
 		if atomic.LoadUint32(&totalConns) >= uint32(maxTotalConns) {
 			_ = c.Close()
 			continue
@@ -119,7 +120,13 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 	defer client.Close()
 	defer atomic.AddUint32(&totalConns, ^uint32(0))
 
+	// SECURITY FIX: Set deadline IMMEDIATELY to prevent Slowloris attacks.
+	// If we sleep for jitter before setting this, an attacker can hold
+	// connections open indefinitely without sending data.
+	_ = client.SetDeadline(time.Now().Add(connTimeout))
+
 	// Optional: timing jitter per connection (0..N ms)
+	// We sleep AFTER setting the deadline, so the clock is already ticking for the client.
 	if cfg.SocksJitterMaxMs > 0 {
 		jMax := cfg.SocksJitterMaxMs
 		if jMax > 5000 {
@@ -130,8 +137,6 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 			time.Sleep(time.Duration(j) * time.Millisecond)
 		}
 	}
-
-	_ = client.SetDeadline(time.Now().Add(connTimeout))
 
 	instCount := len(insts)
 	if instCount == 0 {
@@ -177,6 +182,7 @@ func handleSOCKS(client net.Conn, insts []*config.Instance, cfg *config.Config) 
 
 	tor, err := net.Dial("tcp", string(target[:]))
 	if err != nil {
+		// Silently return on error to avoid leaking infrastructure state to client
 		return
 	}
 	defer tor.Close()
@@ -224,10 +230,6 @@ func pickInstance(instCount int, wantParanoid bool) int {
 }
 
 // Rotation manager: per-instance thresholds from instRotateConns / instRotateSecs.
-// For stable tier, instRotateSecs has already been clamped to ≤ 3600s in config,
-// so no stable instance can live longer than one hour without being marked for rotation.
-// Once draining, as soon as active == 0, we restart — this also handles the
-// "when all connections stopped" case.
 func manageRotations(ctx context.Context, insts []*config.Instance) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -259,18 +261,17 @@ func manageRotations(ctx context.Context, insts []*config.Instance) {
 					if (rotConns > 0 && total >= rotConns) ||
 						(rotSecs > 0 && last != 0 && now-last >= rotSecs) {
 						if atomic.CompareAndSwapUint32(&instanceDraining[idx], 0, 1) {
+							// Internal logging is safe and helpful for debugging
 							slog.Info("marking tor instance for rotation",
 								"id", inst.ID,
 								"tier", instTier[idx],
-								"total_conns", total,
-								"age_seconds", now-last,
 							)
 						}
 					}
 				} else {
 					// draining: wait until no active conns, then restart
 					if active == 0 {
-						slog.Info("rotating tor instance", "id", inst.ID, "tier", instTier[idx])
+						slog.Info("rotating tor instance", "id", inst.ID)
 						if err := inst.Restart(); err != nil {
 							slog.Error("instance restart failed", "id", inst.ID, "err", err)
 							continue
@@ -278,7 +279,7 @@ func manageRotations(ctx context.Context, insts []*config.Instance) {
 						atomic.StoreUint64(&instanceTotal[idx], 0)
 						atomic.StoreUint32(&instanceDraining[idx], 0)
 						atomic.StoreInt64(&instanceLastRestart[idx], now)
-						slog.Info("tor instance rotation complete", "id", inst.ID, "tier", instTier[idx])
+						slog.Info("rotation complete", "id", inst.ID)
 					}
 				}
 			}
