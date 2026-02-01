@@ -17,8 +17,9 @@ func Enforce() error {
 		return err
 	}
 
-	// 2. Connectivity Check: Ensure SOCKS port is open
-	if err := checkPorts(); err != nil {
+	// 2. Connectivity Check: Ensure SOCKS proxy is actually responsive
+	// We perform a SOCKS5 handshake to ensure Tor is stable, not just listening.
+	if err := checkSocksHandshake(); err != nil {
 		return err
 	}
 
@@ -33,19 +34,43 @@ func ensureNotRoot() error {
 	return nil
 }
 
-func checkPorts() error {
-	// Load config to find the correct port (reads env vars like COMMON_SOCKS_PROXY_PORT)
+func checkSocksHandshake() error {
 	cfg := config.Load()
-	
 	target := fmt.Sprintf("127.0.0.1:%s", cfg.SocksPort)
-	
-	// Try to connect to the SOCKS port with a short timeout
-	conn, err := net.DialTimeout("tcp", target, 1*time.Second)
+	timeout := 2 * time.Second
+
+	// 1. Dial the TCP port
+	conn, err := net.DialTimeout("tcp", target, timeout)
 	if err != nil {
-		return fmt.Errorf("LIVENESS FAIL: Cannot connect to SOCKS proxy at %s: %v", target, err)
+		return fmt.Errorf("LIVENESS FAIL: TCP dial failed to %s: %v", target, err)
 	}
-	conn.Close()
-	
-	slog.Info("healthcheck: passed", "uid", os.Geteuid(), "socks", target)
+	defer conn.Close()
+
+	// 2. Perform SOCKS5 Handshake (Lightweight)
+	// We send the "Hello" to see if Tor accepts the protocol or drops us.
+	// [VER=5, NMETHODS=1, METHOD=0(NoAuth)]
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("deadline error: %v", err)
+	}
+
+	_, err = conn.Write([]byte{0x05, 0x01, 0x00})
+	if err != nil {
+		return fmt.Errorf("LIVENESS FAIL: SOCKS5 write failed: %v", err)
+	}
+
+	// 3. Read Response
+	// We expect [VER=5, METHOD=0]
+	// If Tor is initializing and resets the connection, this Read will fail.
+	buf := make([]byte, 2)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("LIVENESS FAIL: SOCKS5 handshake read failed (Tor might be bootstrapping): %v", err)
+	}
+	if n != 2 || buf[0] != 0x05 || buf[1] != 0x00 {
+		return fmt.Errorf("LIVENESS FAIL: Invalid SOCKS5 response: %x", buf[:n])
+	}
+
+	// If we got here, Tor is accepting SOCKS5 commands.
+	slog.Info("healthcheck: passed (SOCKS5 handshake OK)", "uid", os.Geteuid(), "socks", target)
 	return nil
 }
