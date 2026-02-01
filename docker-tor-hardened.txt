@@ -4,43 +4,65 @@ profile docker-tor-hardened flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
 
-  # Network access
+  # === NETWORK ACCESS ===
   network inet tcp,
   network inet udp,
-
-  # Deny raw sockets (packet crafting)
+  # Deny raw sockets (prevents packet spoofing/crafting)
   deny network raw,
 
-  # Allow reading the binary and libraries
-  /usr/local/bin/torgo rpx,
-  /usr/bin/tor rpx,
+  # === EXECUTABLES (The Fix) ===
+  # We use 'rmix':
+  # r = read (the binary file)
+  # m = map (memory mapping required for execution)
+  # ix = inherit execute (run child process under THIS same profile)
+  
+  /usr/local/bin/torgo rmix,
+  /usr/bin/tor rmix,
+  /usr/bin/obfs4proxy rmix,
+  
+  # Allow shell for basic setup if needed (Alpine uses busybox/sh)
+  /bin/sh rmix,
+  /bin/busybox rmix,
+
+  # === SYSTEM LIBRARIES ===
   /lib/** rm,
   /usr/lib/** rm,
+  /usr/local/lib/** rm,
 
-  # Config files
+  # === CONFIGURATION FILES (Read Only) ===
   /etc/tor/torrc.template r,
-  /etc/torgo/seccomp.json r,
+  /etc/torgo/** r,
   /etc/resolv.conf r,
   /etc/hosts r,
   /etc/group r,
   /etc/passwd r,
+  /etc/nsswitch.conf r,
+  /usr/share/tor/** r,  # GeoIP files often live here
 
-  # Writable data areas (RAM disks)
-  # We strictly limit writing to the tmpfs mounts
-  /var/lib/tor-temp/** rw,
-  /run/** rw,
-  /tmp/** rw,
-  
-  # Deny writing to anything else
+  # === WRITABLE DATA AREAS (RAM Disks) ===
+  # We strictly limit writing to the tmpfs mounts defined in Docker Compose
+  /var/lib/tor-temp/** rwk,
+  /var/lib/tor/** rwk,
+  /run/** rwk,
+  /tmp/** rwk,
+
+  # === DENY WRITES (Hardening) ===
+  # Explicitly deny writing to system directories, even if permissions somehow allowed it
   deny /usr/** w,
   deny /etc/** w,
   deny /boot/** w,
   deny /sys/** w,
   deny /proc/** w,
   
-  # Capabilities (allow mlock for secmem)
+  # === SYSTEM READS ===
+  # Tor/Go need to read system status (CPU, Mem) to optimize performance
+  /proc/** r,
+  /sys/** r,
+
+  # === CAPABILITIES ===
+  # Allow mlock to prevent swapping sensitive data to disk (SECMEM)
   capability ipc_lock,
-  
-  # Signal handling
+
+  # === SIGNALS ===
   signal,
 }
