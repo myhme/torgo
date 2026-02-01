@@ -5,7 +5,7 @@ ClientOnly 1
 AvoidDiskWrites 1
 SafeLogging 1
 
-# Log only to stdout/stderr (container logs), never to disk
+# Log only to stdout/stderr
 Log notice stdout
 Log warn stderr
 Log err stderr
@@ -18,25 +18,20 @@ VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
-########## Local ports (torgo connects here on 127.0.0.1) ##########
-# The template variable is substituted by the program.
-# Keep the Isolate* flags — they greatly reduce cross-stream linkability.
+########## Local ports ##########
+# SOCKS Port with isolation flags
 SocksPort {{.SOCKSPORT}} IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
-
-# Reasonable SOCKS timeouts so interactive browsing (pages, websockets)
-# doesn't break too quickly while still avoiding long-lived cleartext connections.
 SocksTimeout 300
 KeepalivePeriod 20
 
-DNSPort {{.DNSPORT}} AutomapHostsOnResolve 1
+# DNS Port (Automap is already enabled globally above)
+DNSPort {{.DNSPORT}}
 
 ########## BLINDED CONTROL SURFACE ##########
-# No ControlPort, no cookie auth – torgo is deliberately "blind".
-# If you ever see ControlPort or CookieAuthentication enabled here, something is wrong.
 UseEntryGuards 1
 NumEntryGuards 3
 
-########## Circuit / timeout behavior (very aggressive) ##########
+########## Circuit / timeout behavior ##########
 MaxCircuitDirtiness 60
 NewCircuitPeriod 15
 CircuitBuildTimeout 10
