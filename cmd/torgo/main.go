@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -14,37 +16,56 @@ import (
 	"torgo/internal/dns"
 	"torgo/internal/health"
 	"torgo/internal/secmem"
-	"torgo/internal/socks"
 	"torgo/internal/selfcheck"
+	"torgo/internal/socks"
 )
 
 func main() {
-	// 1. Memory protection — permanent and irreversible
+	// 1. Parse flags immediately (Critical for Docker Healthchecks)
+	selfCheck := flag.Bool("selfcheck", false, "Run container healthcheck and exit")
+	flag.Parse()
+
+	// 2. Fast Path: Healthcheck
+	// We skip secmem.Init() here because allocating/wiping 128MB
+	// every 30s for a healthcheck causes timeouts.
+	if *selfCheck {
+		// selfcheck.Enforce checks Root status AND Port connectivity
+		if err := selfcheck.Enforce(); err != nil {
+			slog.Error("healthcheck failed", "err", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// 3. Main Process Security Check (Root Check)
+	// We must ensure the main process is not root before doing anything heavy.
+	if os.Geteuid() == 0 {
+		slog.Error("SECURITY FAIL: Main process running as ROOT (uid=0). Aborting.")
+		os.Exit(1)
+	}
+
+	// 4. Memory protection — permanent and irreversible
+	// This locks RAM (mlock) and disables swap/core dumps.
 	if err := secmem.Init(); err != nil {
 		slog.Error("secmem init failed — aborting", "err", err)
 		os.Exit(1)
 	}
 	defer secmem.Wipe()
 
-	// 1.5 Runtime environment self-check (caps, tracing, uid/gid)
-	if err := selfcheck.Enforce(); err != nil {
-		slog.Error("environment self-check failed", "err", err)
-		os.Exit(1)
-	}
-
+	// 4.1 Strict Memory Verification
 	if os.Getenv("SECMEM_REQUIRE_MLOCK") == "true" && !secmem.IsMLocked() {
-		slog.Error("mlockall failed — refusing to run on hostile host")
+		slog.Error("mlockall failed — refusing to run on hostile host (SECMEM_REQUIRE_MLOCK=true)")
 		os.Exit(1)
 	}
 
-	// 2. Load config + start all Tor instances
+	// 5. Load config + start all Tor instances
 	cfg := config.Load()
 	slog.Info("torgo zero-trust starting", "instances", cfg.Instances)
 
 	instances := startTorInstances(cfg)
 	waitForTorReady(instances)
 
-	// 3. Graceful shutdown context
+	// 6. Graceful shutdown context
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
@@ -53,17 +74,18 @@ func main() {
 	)
 	defer cancel()
 
-	// 4. Start services (all are self-healing and DoS-resistant)
+	// 7. Start services (all are self-healing and DoS-resistant)
 	go socks.Start(ctx, instances, cfg)
 	go dns.Start(ctx, instances, cfg)
 	go health.Monitor(ctx, instances)
 
 	slog.Info("torgo active — SOCKS 9150 | DNS 5353 — memory locked and non-dumpable")
 
-	// 5. Block until shutdown signal
+	// 8. Block until shutdown signal
 	<-ctx.Done()
 
-	// 6. Clean shutdown
+	// 9. Clean shutdown
+	slog.Info("shutting down...")
 	killAllTor(instances)
 	slog.Info("shutdown complete — all sensitive memory wiped")
 }
@@ -92,18 +114,23 @@ func startTorInstances(cfg *config.Config) []*config.Instance {
 
 func waitForTorReady(insts []*config.Instance) {
 	deadline := time.Now().Add(120 * time.Second)
+	slog.Info("waiting for tor instances to bootstrap...")
+
 	for time.Now().Before(deadline) {
-		ready := true
+		readyCount := 0
 		for _, inst := range insts {
-			addr := "127.0.0.1:" + itoaQuick(inst.SocksPort)
-			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-			if err != nil {
-				ready = false
-				break
+			// Use fmt.Sprintf for safe address formatting (prevents null byte bugs)
+			addr := fmt.Sprintf("127.0.0.1:%d", inst.SocksPort)
+			
+			// Short timeout check
+			conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+			if err == nil {
+				_ = conn.Close()
+				readyCount++
 			}
-			_ = conn.Close()
 		}
-		if ready {
+
+		if readyCount == len(insts) {
 			slog.Info("all tor instances ready", "count", len(insts))
 			return
 		}
@@ -117,18 +144,4 @@ func killAllTor(insts []*config.Instance) {
 	for _, inst := range insts {
 		inst.Close()
 	}
-}
-
-// Fast zero-allocation itoa (used only here — no import bloat)
-func itoaQuick(n int) string {
-	buf := [11]byte{}
-	i := len(buf)
-	for n >= 10 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	i--
-	buf[i] = byte('0' + n)
-	return string(buf[i:])
 }
