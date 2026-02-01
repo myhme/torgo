@@ -1,4 +1,4 @@
-# === 2026 PRIVACY HARDENED TOR (NO 5-EYES) ===
+# === 2026 PRIVACY HARDENED TOR (NO 5-EYES / ANTI-FINGERPRINT) ===
 
 ########## Client-only, diskless ##########
 ClientOnly 1
@@ -19,7 +19,7 @@ AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
 ########## Local ports ##########
-# SOCKS Port with strict isolation
+# SOCKS Port with strict isolation to prevent cross-stream identity linking
 SocksPort {{.SOCKSPORT}} IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
 SocksTimeout 300
 KeepalivePeriod 20
@@ -29,11 +29,19 @@ DNSPort {{.DNSPORT}}
 
 ########## BLINDED CONTROL SURFACE ##########
 UseEntryGuards 1
-NumEntryGuards 3
+# HARDENING: Pin to 1 Guard to reduce surface area.
+# Connecting to fewer entry nodes makes your traffic look like a stable VPN tunnel
+# rather than a suspicious "spiderweb" of connections.
+NumEntryGuards 1
 
 ########## Circuit / timeout behavior ##########
-MaxCircuitDirtiness 60
-NewCircuitPeriod 15
+# HARDENING: Slower rotation prevents "machine gun" traffic patterns.
+# Rotating too fast (e.g. 15s) creates a distinct heartbeat that machine learning
+# can easily fingerprint. 10 minutes (600s) is standard and blends in better.
+MaxCircuitDirtiness 600
+NewCircuitPeriod 120
+
+# Fail fast if a node is dead
 CircuitBuildTimeout 10
 CircuitStreamTimeout 30
 
