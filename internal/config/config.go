@@ -18,15 +18,18 @@ type Config struct {
 	SocksPort     string
 	DNSPort       string
 	BlindControl  bool
-	
+
+	// Global limits
 	MaxConnsPerInstance int
 	MaxTotalConns       int
 	RotateAfterConns    int
 	RotateAfterSeconds  int
 
+	// DNS concurrency limits
 	DNSMaxConns        int
 	DNSMaxConnsPerInst int
 
+	// Two-tier pool config
 	StableInstances             int
 	StableMaxConnsPerInstance   int
 	StableRotateConns           int
@@ -37,7 +40,9 @@ type Config struct {
 	ParanoidTrafficPercent      int
 
 	SocksJitterMaxMs int
-	ChaffEnabled     bool // Retained
+
+	// Traffic padding
+	ChaffEnabled bool
 }
 
 type Instance struct {
@@ -66,9 +71,7 @@ func Load() *Config {
 
 		MaxConnsPerInstance: getInt("TORGO_MAX_CONNS_PER_INSTANCE", 64, 4096),
 		MaxTotalConns:       getInt("TORGO_MAX_TOTAL_CONNS", 512, 65535),
-		RotateAfterConns:    getInt("TORGO_ROTATE_CONNS", 64, 1_000_000),
-		RotateAfterSeconds:  getInt("TORGO_ROTATE_SECS", 900, 86_400),
-
+		
 		DNSMaxConns:        getInt("TORGO_DNS_MAX_CONNS", 256, 4096),
 		DNSMaxConnsPerInst: getInt("TORGO_DNS_MAX_PER_INST", 64, 1024),
 
@@ -76,32 +79,82 @@ func Load() *Config {
 		ChaffEnabled:     os.Getenv("TORGO_ENABLE_CHAFF") == "1",
 	}
 
+	// 1. GLOBAL ROTATION SETTINGS
+	// We allow 0 to mean "Disabled".
+	// The max value is set very high (10 years) to allow long-running setups.
+	c.RotateAfterConns = getInt("TORGO_ROTATE_CONNS", 64, 1_000_000_000)
+	c.RotateAfterSeconds = getInt("TORGO_ROTATE_SECS", 900, 315_360_000)
+
+	// 2. TIER CALCULATIONS
 	defaultStable := n / 2
 	if defaultStable == 0 && n > 0 {
 		defaultStable = 1
 	}
-
 	c.StableInstances = clamp(getInt("TORGO_STABLE_INSTANCES", defaultStable, n), 0, n)
 	c.StableMaxConnsPerInstance = getInt("TORGO_STABLE_MAX_CONNS", max(c.MaxConnsPerInstance*2, 64), 8192)
 
-	rawStableRotateSecs := getInt("TORGO_STABLE_ROTATE_SECS", max(c.RotateAfterSeconds*4, 3600), 7*24*3600)
-	if rawStableRotateSecs > 3600 { rawStableRotateSecs = 3600 }
-	if rawStableRotateSecs <= 0 { rawStableRotateSecs = 3600 }
-	c.StableRotateSeconds = rawStableRotateSecs
+	// --- STABLE ROTATION ---
+	// Default: If global is 0 (disabled), stable is 0. Else 4x global.
+	var defStableSecs int
+	if c.RotateAfterSeconds == 0 {
+		defStableSecs = 0
+	} else {
+		defStableSecs = max(c.RotateAfterSeconds*4, 3600)
+	}
+	
+	// FIX: Removed the logic that forced this to be > 3600. 
+	// Now accepts 0 from env var or derived default.
+	c.StableRotateSeconds = getInt("TORGO_STABLE_ROTATE_SECS", defStableSecs, 315_360_000)
 
-	c.StableRotateConns = getInt("TORGO_STABLE_ROTATE_CONNS", max(c.RotateAfterConns*4, 256), 5_000_000)
+	var defStableConns int
+	if c.RotateAfterConns == 0 {
+		defStableConns = 0
+	} else {
+		defStableConns = max(c.RotateAfterConns*4, 256)
+	}
+	c.StableRotateConns = getInt("TORGO_STABLE_ROTATE_CONNS", defStableConns, 1_000_000_000)
+
+
+	// --- PARANOID ROTATION ---
 	c.ParanoidMaxConnsPerInstance = getInt("TORGO_PARANOID_MAX_CONNS", max(16, c.MaxConnsPerInstance/2), 2048)
-	c.ParanoidRotateConns = getInt("TORGO_PARANOID_ROTATE_CONNS", max(16, c.RotateAfterConns/2), 1_000_000)
-	c.ParanoidRotateSeconds = getInt("TORGO_PARANOID_ROTATE_SECS", max(120, c.RotateAfterSeconds/3), 24*3600)
+	
+	// Default: If global is 0, paranoid is 0. Else global/2 or global/3.
+	var defParanoidConns int
+	if c.RotateAfterConns == 0 {
+		defParanoidConns = 0
+	} else {
+		defParanoidConns = max(16, c.RotateAfterConns/2)
+	}
+	c.ParanoidRotateConns = getInt("TORGO_PARANOID_ROTATE_CONNS", defParanoidConns, 1_000_000_000)
+
+	var defParanoidSecs int
+	if c.RotateAfterSeconds == 0 {
+		defParanoidSecs = 0
+	} else {
+		defParanoidSecs = max(120, c.RotateAfterSeconds/3)
+	}
+	c.ParanoidRotateSeconds = getInt("TORGO_PARANOID_ROTATE_SECS", defParanoidSecs, 315_360_000)
+
 	c.ParanoidTrafficPercent = clamp(getInt("TORGO_PARANOID_TRAFFIC_PERCENT", 30, 100), 0, 100)
 
 	cfg = c
-	slog.Info("zero-trust config loaded", "instances", c.Instances, "chaffEnabled", c.ChaffEnabled)
+
+	slog.Info("zero-trust config loaded",
+		"instances", c.Instances,
+		"blind", c.BlindControl,
+		"maxTotalConns", c.MaxTotalConns,
+		"rotateAfterSeconds", c.RotateAfterSeconds,
+		"stableRotateSeconds", c.StableRotateSeconds,     // Check this in logs!
+		"paranoidRotateSeconds", c.ParanoidRotateSeconds, // Check this in logs!
+		"chaffEnabled", c.ChaffEnabled,
+	)
+
 	return c
 }
 
 func (i *Instance) Start() error {
 	i.DataDir = fmt.Sprintf("/var/lib/tor-temp/i%d", i.ID)
+
 	if err := os.MkdirAll(i.DataDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir data dir failed: %w", err)
 	}
@@ -117,6 +170,7 @@ func (i *Instance) Start() error {
 
 	var b strings.Builder
 	b.Grow(2048)
+
 	data := map[string]string{
 		"SOCKSPORT": "127.0.0.1:" + strconv.Itoa(i.SocksPort),
 		"DNSPORT":   "127.0.0.1:" + strconv.Itoa(i.DNSPort),
@@ -131,7 +185,10 @@ func (i *Instance) Start() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = i.DataDir
-	cmd.Env = []string{"HOME=" + i.DataDir, "PATH=/usr/bin:/bin"}
+	cmd.Env = []string{
+		"HOME=" + i.DataDir,
+		"PATH=/usr/bin:/bin",
+	}
 
 	i.cmd = cmd
 	if err := cmd.Start(); err != nil {
@@ -142,10 +199,10 @@ func (i *Instance) Start() error {
 	return nil
 }
 
-// Close gracefully stops Tor and REMOVES the data directory.
 func (i *Instance) Close() {
 	if i.cmd != nil && i.cmd.Process != nil {
 		_ = i.cmd.Process.Signal(os.Interrupt)
+
 		done := make(chan error, 1)
 		go func() { done <- i.cmd.Wait() }()
 		select {
@@ -154,7 +211,6 @@ func (i *Instance) Close() {
 			_ = i.cmd.Process.Kill()
 		}
 	}
-	// Wipe data (Standard behavior)
 	if i.DataDir != "" && strings.HasPrefix(i.DataDir, "/var/lib/tor-temp") {
 		_ = os.RemoveAll(i.DataDir)
 	}
@@ -168,17 +224,37 @@ func (i *Instance) Restart() error {
 func (i *Instance) CookiePath() string { return "" }
 
 // --- helpers ---
+
 func getEnv(key, def string) string {
-	if s := os.Getenv(key); s != "" { return s }
+	if s := os.Getenv(key); s != "" {
+		return s
+	}
 	return def
 }
 
 func getInt(env string, def, maxVal int) int {
 	if s := os.Getenv(env); s != "" {
-		if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= maxVal { return v }
+		// FIX: Allow 0 to be returned (v >= 0)
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 && v <= maxVal {
+			return v
+		}
 	}
 	return def
 }
 
-func max(a, b int) int { if a > b { return a }; return b }
-func clamp(v, lo, hi int) int { if v < lo { return lo }; if v > hi { return hi }; return v }
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
