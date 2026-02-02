@@ -1,4 +1,4 @@
-// internal/health/health.go — FINAL 2025 UNBREAKABLE VERSION
+// internal/health/health.go — MONITOR ONLY (NO HEALING)
 package health
 
 import (
@@ -12,24 +12,54 @@ import (
 	"torgo/internal/config"
 )
 
-// Per-instance state (atomic, lock-free)
+// Per-instance state
 type instanceState struct {
-	healthy    uint32        // 1 = healthy, 0 = dead
-	backoff    uint32        // seconds, capped at 300
-	lastSeen   time.Time
-	restartCnt uint64
+	healthy  uint32    // 1 = healthy, 0 = dead
+	lastSeen time.Time
 }
 
-var states [32]*instanceState // supports up to 32 instances
+var states [32]*instanceState
 
 func init() {
 	for i := range states {
-		states[i] = &instanceState{healthy: 1}
+		states[i] = &instanceState{healthy: 1, lastSeen: time.Now()}
 	}
 }
 
+// CheckSocks performs a strict SOCKS5 handshake.
+// Shared by main.go and selfcheck.go.
+func CheckSocks(port int) error {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	timeout := 1 * time.Second
+
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+
+	// 1. Send SOCKS5 Hello
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		return fmt.Errorf("write failed: %w", err)
+	}
+
+	// 2. Read Response
+	buf := make([]byte, 2)
+	if _, err := conn.Read(buf); err != nil {
+		return fmt.Errorf("read failed: %w", err)
+	}
+
+	if buf[0] != 0x05 || buf[1] != 0x00 {
+		return fmt.Errorf("bad handshake: %x", buf)
+	}
+
+	return nil
+}
+
 func Monitor(ctx context.Context, insts []*config.Instance) {
-	ticker := time.NewTicker(15 * time.Second) // faster detection
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -38,53 +68,26 @@ func Monitor(ctx context.Context, insts []*config.Instance) {
 			return
 		case <-ticker.C:
 			for idx, inst := range insts {
-				checkAndHeal(inst, idx)
+				checkInstance(inst, idx)
 			}
 		}
 	}
 }
 
-func checkAndHeal(inst *config.Instance, idx int) {
+func checkInstance(inst *config.Instance, idx int) {
 	state := states[idx]
 
-	// Fast path: try quick TCP dial to instance's SOCKS port
-	if atomic.LoadUint32(&state.healthy) == 1 {
-		addr := fmt.Sprintf("127.0.0.1:%d", inst.SocksPort)
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err == nil {
-			_ = conn.Close()
-			state.lastSeen = time.Now()
-			return
+	// Try strict check
+	if err := CheckSocks(inst.SocksPort); err == nil {
+		if atomic.SwapUint32(&state.healthy, 1) == 0 {
+			slog.Info("tor instance recovered (externally)", "id", inst.ID)
 		}
-	}
-
-	// Something is wrong — mark unhealthy
-	atomic.StoreUint32(&state.healthy, 0)
-	backoff := atomic.LoadUint32(&state.backoff)
-	if backoff == 0 {
-		backoff = 1
-	}
-
-	if time.Since(state.lastSeen) < time.Duration(backoff)*time.Second {
-		return // still in back-off
-	}
-
-	slog.Warn("tor instance dead → restarting", "id", inst.ID, "attempt", atomic.AddUint64(&state.restartCnt, 1))
-
-	if err := inst.Restart(); err != nil {
-		slog.Error("restart failed", "id", inst.ID, "err", err)
-		// Exponential back-off, max 5 minutes
-		newBackoff := backoff * 2
-		if newBackoff > 300 {
-			newBackoff = 300
-		}
-		atomic.StoreUint32(&state.backoff, newBackoff)
+		state.lastSeen = time.Now()
 		return
 	}
 
-	// Success → reset everything
-	atomic.StoreUint32(&state.healthy, 1)
-	atomic.StoreUint32(&state.backoff, 0)
-	state.lastSeen = time.Now()
-	slog.Info("tor instance recovered", "id", inst.ID)
+	// Mark as unhealthy, but DO NOT RESTART (No Guard Rotation)
+	if atomic.SwapUint32(&state.healthy, 0) == 1 {
+		slog.Error("tor instance unresponsive — manual intervention required", "id", inst.ID)
+	}
 }

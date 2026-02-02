@@ -4,14 +4,13 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"torgo/internal/chaff"
 	"torgo/internal/config"
 	"torgo/internal/dns"
 	"torgo/internal/health"
@@ -21,15 +20,11 @@ import (
 )
 
 func main() {
-	// 1. Parse flags immediately (Critical for Docker Healthchecks)
+	// 1. Flags & Healthcheck
 	selfCheck := flag.Bool("selfcheck", false, "Run container healthcheck and exit")
 	flag.Parse()
 
-	// 2. Fast Path: Healthcheck
-	// We skip secmem.Init() here because allocating/wiping 128MB
-	// every 30s for a healthcheck causes timeouts.
 	if *selfCheck {
-		// selfcheck.Enforce checks Root status AND Port connectivity
 		if err := selfcheck.Enforce(); err != nil {
 			slog.Error("healthcheck failed", "err", err)
 			os.Exit(1)
@@ -37,35 +32,33 @@ func main() {
 		os.Exit(0)
 	}
 
-	// 3. Main Process Security Check (Root Check)
-	// We must ensure the main process is not root before doing anything heavy.
+	// 2. Security Checks
 	if os.Geteuid() == 0 {
 		slog.Error("SECURITY FAIL: Main process running as ROOT (uid=0). Aborting.")
 		os.Exit(1)
 	}
 
-	// 4. Memory protection — permanent and irreversible
-	// This locks RAM (mlock) and disables swap/core dumps.
 	if err := secmem.Init(); err != nil {
 		slog.Error("secmem init failed — aborting", "err", err)
 		os.Exit(1)
 	}
 	defer secmem.Wipe()
 
-	// 4.1 Strict Memory Verification
 	if os.Getenv("SECMEM_REQUIRE_MLOCK") == "true" && !secmem.IsMLocked() {
 		slog.Error("mlockall failed — refusing to run on hostile host (SECMEM_REQUIRE_MLOCK=true)")
 		os.Exit(1)
 	}
 
-	// 5. Load config + start all Tor instances
+	// 3. Start Tor
 	cfg := config.Load()
 	slog.Info("torgo zero-trust starting", "instances", cfg.Instances)
 
 	instances := startTorInstances(cfg)
+
+	// 4. Wait for Bootstrap (No Self-Healing)
 	waitForTorReady(instances)
 
-	// 6. Graceful shutdown context
+	// 5. Graceful Shutdown Context
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
@@ -74,17 +67,18 @@ func main() {
 	)
 	defer cancel()
 
-	// 7. Start services (all are self-healing and DoS-resistant)
+	// 6. Start Services
 	go socks.Start(ctx, instances, cfg)
 	go dns.Start(ctx, instances, cfg)
 	go health.Monitor(ctx, instances)
+	go chaff.Start(ctx, cfg) // Deep Surfing Enabled
 
 	slog.Info("torgo active — SOCKS 9150 | DNS 5353 — memory locked and non-dumpable")
 
-	// 8. Block until shutdown signal
+	// 7. Block until signal
 	<-ctx.Done()
 
-	// 9. Clean shutdown
+	// 8. Cleanup
 	slog.Info("shutting down...")
 	killAllTor(instances)
 	slog.Info("shutdown complete — all sensitive memory wiped")
@@ -97,7 +91,6 @@ func startTorInstances(cfg *config.Config) []*config.Instance {
 			ID:        i,
 			SocksPort: 9050 + i,
 			DNSPort:   9200 + i,
-			// DataDir is set inside Instance.Start() based on ID
 		}
 		if err := inst.Start(); err != nil {
 			slog.Error("tor failed to start", "id", i, "err", err)
@@ -113,19 +106,15 @@ func startTorInstances(cfg *config.Config) []*config.Instance {
 }
 
 func waitForTorReady(insts []*config.Instance) {
-	deadline := time.Now().Add(120 * time.Second)
+	// 3 minute absolute timeout
+	deadline := time.Now().Add(180 * time.Second)
 	slog.Info("waiting for tor instances to bootstrap...")
 
 	for time.Now().Before(deadline) {
 		readyCount := 0
 		for _, inst := range insts {
-			// Use fmt.Sprintf for safe address formatting (prevents null byte bugs)
-			addr := fmt.Sprintf("127.0.0.1:%d", inst.SocksPort)
-			
-			// Short timeout check
-			conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-			if err == nil {
-				_ = conn.Close()
+			// Use shared strict check
+			if err := health.CheckSocks(inst.SocksPort); err == nil {
 				readyCount++
 			}
 		}
@@ -136,7 +125,8 @@ func waitForTorReady(insts []*config.Instance) {
 		}
 		time.Sleep(1 * time.Second)
 	}
-	slog.Error("timeout waiting for tor instances")
+	
+	slog.Error("timeout waiting for tor instances — aborting")
 	os.Exit(1)
 }
 
