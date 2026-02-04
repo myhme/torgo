@@ -1,4 +1,4 @@
-# === 2026 PRIVACY HARDENED TOR (DIRECT MODE) ===
+# === 2026 PRIVACY HARDENED TOR (PARANOID DIRECT MODE) ===
 
 ########## Client-only, diskless ##########
 AvoidDiskWrites 1
@@ -13,8 +13,10 @@ VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
 AutomapHostsSuffixes .onion,.exit
 
-########## Local ports ##########
-SocksPort {{.SOCKSPORT}} IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
+########## Local ports (PARANOID ISOLATION) ##########
+# Added IsolateDestPort: SSH (22) and HTTPS (443) to the same host use different circuits
+# Added SessionGroup=1: Forces all isolation flags to apply strictly
+SocksPort {{.SOCKSPORT}} IsolateClientAddr IsolateClientProtocol IsolateDestAddr IsolateDestPort IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth SessionGroup=1
 SocksTimeout 300
 KeepalivePeriod 20
 DNSPort {{.DNSPORT}}
@@ -23,19 +25,22 @@ DNSPort {{.DNSPORT}}
 NumEntryGuards 1
 
 ########## Circuit / timeout behavior ##########
-MaxCircuitDirtiness 600
-NewCircuitPeriod 120
+# AGGRESSIVE ROTATION: Change circuits every 60 seconds (Default is 10 mins)
+# This creates a moving target defense.
+MaxCircuitDirtiness 60
+NewCircuitPeriod 60
 CircuitBuildTimeout 10
 CircuitStreamTimeout 30
 
-########## Anti-Fingerprinting / Padding ##########
+########## Anti-Fingerprinting ##########
 ReducedConnectionPadding 0
 HeartbeatPeriod 60 minutes
 
-########## Routing policy ##########
-# STRICT MODE: ONLY Privacy-Friendly Exits
+########## Routing policy (NO 5 EYES) ##########
 StrictNodes 1
+# Allowed Exits: Privacy-friendly jurisdictions
 ExitNodes {ch},{is},{se},{nl},{no},{ro},{pa},{sc},{sg}
+# Excluded Nodes: 5-Eyes + Hostile
 ExcludeNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr},{in},{br},{sa}
 ExcludeExitNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr},{in},{br},{sa}
 
