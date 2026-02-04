@@ -38,10 +38,9 @@ FROM alpine:${ALPINE_VERSION} AS final
 
 ARG APP_NAME
 
-# Install Tor + Obfuscation
+# Install Tor + Libcap (No obfs4proxy needed)
 RUN apk add --no-cache \
       tor \
-      obfs4proxy \
       libcap \
     && rm -rf /var/cache/apk/* /usr/share/man /tmp/*
 

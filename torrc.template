@@ -1,26 +1,12 @@
-# === 2026 PRIVACY HARDENED TOR (DEBUG MODE) ===
+# === 2026 PRIVACY HARDENED TOR (DIRECT MODE) ===
 
-########## Debug Logging (TEMPORARY) ##########
-# Change "warn" to "info" to see bootstrap progress (10%, 25%, etc.)
-Log info stdout
-
-# Disable SafeLogging to see exact IP addresses/errors causing failures
-# WARNING: This logs sensitive data. Revert to "1" once fixed.
-SafeLogging 0
-
-ProtocolWarnings 1
+########## Client-only, diskless ##########
+AvoidDiskWrites 1
+SafeLogging 1
+Log warn stdout
+ProtocolWarnings 0
 PidFile /dev/null
 DataDirectory {{.DATADIR}}
-
-########## Bridge Configuration ##########
-{{if .USE_BRIDGES}}
-# Standard path for Alpine Linux obfs4proxy
-ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy -enableLogging=true -logLevel=INFO
-{{range .BRIDGES}}
-Bridge {{.}}
-{{end}}
-UseBridges 1
-{{end}}
 
 ########## Virtual addressing / .onion resolution ##########
 VirtualAddrNetworkIPv4 10.192.0.0/10
@@ -46,16 +32,12 @@ CircuitStreamTimeout 30
 ReducedConnectionPadding 0
 HeartbeatPeriod 60 minutes
 
-########## Routing policy (RELAXED FOR DEBUGGING) ##########
-# Disabled StrictNodes to prevent "No circuit" errors
-StrictNodes 0
-
-# Still prefer privacy-friendly exits, but allow fallbacks
+########## Routing policy ##########
+# STRICT MODE: ONLY Privacy-Friendly Exits
+StrictNodes 1
 ExitNodes {ch},{is},{se},{nl},{no},{ro},{pa},{sc},{sg}
-
-# Commented out Exclusions to test basic connectivity first
-# ExcludeNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr},{in},{br},{sa}
-# ExcludeExitNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr},{in},{br},{sa}
+ExcludeNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr},{in},{br},{sa}
+ExcludeExitNodes {us},{ca},{gb},{au},{nz},{ru},{cn},{ir},{kp},{sy},{ve},{by},{tr},{in},{br},{sa}
 
 ########## Network & address sanity ##########
 ClientUseIPv6 0

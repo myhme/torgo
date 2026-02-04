@@ -1,11 +1,7 @@
 package config
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -15,17 +11,6 @@ import (
 	"text/template"
 	"time"
 )
-
-// ephemeralKey is generated once at startup and exists ONLY in RAM.
-// It is used to encrypt sensitive config data so it doesn't sit in plaintext on the heap.
-var ephemeralKey [32]byte
-
-func init() {
-	// Generate a strong random key for in-memory encryption
-	if _, err := io.ReadFull(rand.Reader, ephemeralKey[:]); err != nil {
-		panic("failed to seed memory protection key")
-	}
-}
 
 type Config struct {
 	Instances     int
@@ -56,13 +41,6 @@ type Config struct {
 
 	SocksJitterMaxMs int
 	ChaffEnabled     bool
-
-	// --- ENCRYPTED STORAGE ---
-	// We do NOT store "Bridges []string" here. That would be unsafe in RAM.
-	// Instead, we store the encrypted blob.
-	useBridges       bool
-	encryptedBridges []byte // AES-GCM encrypted block
-	bridgeNonce      []byte
 }
 
 type Instance struct {
@@ -74,11 +52,9 @@ type Instance struct {
 }
 
 type TemplateData struct {
-	SOCKSPORT   string
-	DNSPORT     string
-	DATADIR     string
-	USE_BRIDGES bool
-	BRIDGES     []string
+	SOCKSPORT string
+	DNSPORT   string
+	DATADIR   string
 }
 
 var (
@@ -90,67 +66,8 @@ var (
 func Load() *Config {
 	n := getInt("TOR_INSTANCES", 8, 32)
 
-	// --- 1. SECURE BRIDGE LOADING ---
-	var rawBridges string
-	
-	// A. Check Docker Secrets (Preferred)
-	secretPath := os.Getenv("TORGO_BRIDGES_FILE")
-	if secretPath == "" {
-		secretPath = "/run/secrets/torgo_bridges"
-	}
-	
-	if content, err := os.ReadFile(secretPath); err == nil {
-		rawBridges = string(content)
-		slog.Info("loaded bridges from secret", "source", "file")
-	} else {
-		// B. Check Env (Fallback)
-		rawBridges = os.Getenv("TORGO_BRIDGES")
-		if rawBridges != "" {
-			slog.Warn("loaded bridges from env (less secure)")
-		}
-	}
-
-	// --- 2. IMMEDIATE MEMORY SCRUBBING ---
-	// Remove the environment variable from the process block immediately
-	// so it doesn't appear in /proc/self/environ
+	// Ensure no lingering sensitive env vars from previous runs exist
 	os.Unsetenv("TORGO_BRIDGES")
-
-	// Parse bridges
-	var bridges []string
-	if rawBridges != "" {
-		rawBridges = strings.ReplaceAll(rawBridges, "\n", ",")
-		rawBridges = strings.ReplaceAll(rawBridges, ";", ",")
-		parts := strings.Split(rawBridges, ",")
-		for _, b := range parts {
-			if trimmed := strings.TrimSpace(b); trimmed != "" {
-				bridges = append(bridges, trimmed)
-			}
-		}
-	}
-
-	// --- 3. ENCRYPT IN MEMORY ---
-	var encBridges []byte
-	var nonce []byte
-	
-	if len(bridges) > 0 {
-		// Join them into a single block to encrypt
-		plaintext := []byte(strings.Join(bridges, "|||"))
-		
-		block, _ := aes.NewCipher(ephemeralKey[:])
-		gcm, _ := cipher.NewGCM(block)
-		nonce = make([]byte, gcm.NonceSize())
-		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-			panic("nonce gen failed")
-		}
-		
-		// Encrypt!
-		encBridges = gcm.Seal(nil, nonce, plaintext, nil)
-		
-		// FORCE GC to help clear the plaintext 'bridges' slice from Heap
-		// (We can't force-wipe strings in Go, but we can encourage collection)
-		bridges = nil
-		rawBridges = ""
-	}
 
 	c := &Config{
 		Instances:     n,
@@ -167,11 +84,6 @@ func Load() *Config {
 
 		SocksJitterMaxMs: getInt("TORGO_SOCKS_JITTER_MS_MAX", 0, 5000),
 		ChaffEnabled:     os.Getenv("TORGO_ENABLE_CHAFF") == "1",
-
-		// Store ONLY the ciphertext
-		useBridges:       len(encBridges) > 0,
-		encryptedBridges: encBridges,
-		bridgeNonce:      nonce,
 	}
 
 	// Rotation Settings
@@ -209,29 +121,11 @@ func Load() *Config {
 	slog.Info("zero-trust config loaded",
 		"instances", c.Instances,
 		"blind", c.BlindControl,
-		"bridges_encrypted", c.useBridges, // Do not log actual bridge count or content
+		"chaffEnabled", c.ChaffEnabled,
+		"mode", "direct_tor_hardened",
 	)
 
 	return c
-}
-
-// getBridges temporarily decrypts the bridges for config generation
-func (c *Config) getBridges() []string {
-	if !c.useBridges || len(c.encryptedBridges) == 0 {
-		return nil
-	}
-
-	block, _ := aes.NewCipher(ephemeralKey[:])
-	gcm, _ := cipher.NewGCM(block)
-	
-	plaintext, err := gcm.Open(nil, c.bridgeNonce, c.encryptedBridges, nil)
-	if err != nil {
-		slog.Error("bridge decryption failed (memory corruption?)")
-		return nil
-	}
-	
-	// Convert back to slice
-	return strings.Split(string(plaintext), "|||")
 }
 
 func (i *Instance) Start() error {
@@ -251,19 +145,12 @@ func (i *Instance) Start() error {
 	})
 
 	var b strings.Builder
-	b.Grow(4096)
-
-	// DECRYPT BRIDGES MOMENTARILY
-	// They exist in RAM as plaintext *only* during this template execution.
-	// As soon as this function returns, 'plainBridges' goes out of scope and is eligible for GC.
-	plainBridges := cfg.getBridges()
+	b.Grow(2048)
 
 	data := TemplateData{
 		SOCKSPORT:   "127.0.0.1:" + strconv.Itoa(i.SocksPort),
 		DNSPORT:     "127.0.0.1:" + strconv.Itoa(i.DNSPort),
 		DATADIR:     i.DataDir,
-		USE_BRIDGES: cfg.useBridges,
-		BRIDGES:     plainBridges,
 	}
 
 	if err := globalTmpl.Execute(&b, data); err != nil {
@@ -275,9 +162,11 @@ func (i *Instance) Start() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = i.DataDir
+	
+	// Zero Trust Environment: Minimal PATH, no external vars
 	cmd.Env = []string{
 		"HOME=" + i.DataDir,
-		"PATH=/usr/bin:/bin:/usr/local/bin", 
+		"PATH=/usr/bin:/bin", 
 	}
 
 	i.cmd = cmd
@@ -285,11 +174,6 @@ func (i *Instance) Start() error {
 		slog.Error("tor start failed", "id", i.ID, "err", err)
 		return err
 	}
-	
-	// Optional: Suggest GC to clean up the plaintext string we just made
-	// (Don't do this too often as it hurts CPU, but strictly speaking it helps security)
-	// runtime.GC() 
-	
 	slog.Info("tor instance started", "id", i.ID)
 	return nil
 }
