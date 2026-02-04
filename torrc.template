@@ -48,7 +48,7 @@ HeartbeatPeriod 60 minutes
 
 ########## Routing policy (NO 5 EYES) ##########
 # NOTE: If bootstrap hangs, comment out StrictNodes
-StrictNodes 1
+StrictNodes 0
 
 # 1. ALLOWED EXITS: Privacy-friendly jurisdictions
 # ch=Switzerland, is=Iceland, se=Sweden, nl=Netherlands, no=Norway,
