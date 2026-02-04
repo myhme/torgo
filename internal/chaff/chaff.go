@@ -1,5 +1,4 @@
-// internal/chaff/chaff.go — DEEP SURFING EDITION
-// internal/chaff/chaff.go — LOW-BANDWIDTH CINEMA EDITION
+// internal/chaff/chaff.go — ACTIVE SCROLLING & SEARCH EDITION
 package chaff
 
 import (
@@ -28,20 +27,16 @@ import (
 
 const (
 	minChainDepth = 3   // Visit at least 3 pages per session
-	maxChainDepth = 8   // Up to 8 pages for deep surfing
+	maxChainDepth = 8   // Up to 8 pages
 	
-	// Text/Article Reading Behavior
-	readTimeMean   = 45  // Average 45s reading a page
-	readTimeStdDev = 20  // Deviation
+	readTimeMean   = 45  // Average 45s reading
+	readTimeStdDev = 20
 	
-	// Video Watching Behavior (Cinema Mode)
-	// We simulate watching short-form content (3-10 mins)
-	watchTimeMean   = 240 // 4 minutes average
-	watchTimeStdDev = 120 // +/- 2 minutes
+	watchTimeMean   = 240 // 4 minutes video
+	watchTimeStdDev = 120
 )
 
-// "Low-Data" Video Sites (No Login Required, No huge paywalls)
-// We avoid YouTube/Netflix because they require login or CAPTCHAs often.
+// Video/Cinema Sites (No Login)
 var videoDomains = map[string]bool{
 	"vimeo.com": true, "www.vimeo.com": true,
 	"dailymotion.com": true, "www.dailymotion.com": true,
@@ -50,14 +45,20 @@ var videoDomains = map[string]bool{
 	"archive.org": true, "www.archive.org": true,
 }
 
-var seedSites = []string{
-	// Video & Media (Cinema Mode Targets)
-	"https://vimeo.com/watch", 
-	"https://www.dailymotion.com", 
-	"https://www.ted.com/talks",
-	"https://archive.org/details/movies",
+// Search Engines for Referer Spoofing
+var searchReferers = []string{
+	"https://www.google.com/",
+	"https://www.bing.com/",
+	"https://duckduckgo.com/",
+	"https://search.yahoo.com/",
+}
 
-	// News - Global (Text heavy)
+var seedSites = []string{
+	// Video & Media
+	"https://vimeo.com/watch", "https://www.dailymotion.com", 
+	"https://www.ted.com/talks", "https://archive.org/details/movies",
+
+	// News - Global
 	"https://www.bbc.com", "https://www.cnn.com", "https://www.nytimes.com",
 	"https://www.theguardian.com", "https://www.reuters.com", "https://www.aljazeera.com",
 	
@@ -68,7 +69,7 @@ var seedSites = []string{
 	// Knowledge
 	"https://en.wikipedia.org/wiki/Special:Random", "https://www.wikihow.com",
 	
-	// Shopping (Browsing behavior)
+	// Shopping
 	"https://www.amazon.com", "https://www.ebay.com", "https://www.target.com",
 }
 
@@ -77,7 +78,6 @@ func Start(ctx context.Context, cfg *config.Config) {
 		return
 	}
 
-	// Wait for Tor circuits to stabilize before generating noise
 	slog.Info("chaff waiting for circuit stabilization...")
 	select {
 	case <-ctx.Done():
@@ -87,21 +87,37 @@ func Start(ctx context.Context, cfg *config.Config) {
 	
 	slog.Info("chaff deep-surfer active", 
 		"seeds", len(seedSites), 
-		"mode", "low-bandwidth-cinema",
+		"mode", "circadian-active-scrolling",
 	)
 
-	// Launch the surfer
 	go surferLoop(ctx, cfg.SocksPort)
 }
 
 func surferLoop(ctx context.Context, socksPort string) {
 	for {
-		// 1. Perform a complete browsing session
+		// 1. Circadian Rhythm Check
+		sleepFactor := getCircadianFactor()
+		
+		// If mostly asleep (late night), 80% chance to skip session
+		if sleepFactor > 0.8 && randomInt(100) < 80 {
+			slog.Debug("chaff user sleeping (circadian)", "factor", sleepFactor)
+			longSleep := randomDuration(600, 3600) // Sleep 10m to 1hr
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(longSleep):
+			}
+			continue
+		}
+
+		// 2. Perform Session
 		performSession(ctx, socksPort)
 
-		// 2. Variable Break Time (Gaussian distribution)
-		// Humans take breaks. Mean 2 mins, but sometimes longer.
-		breakDur := randomGaussianDuration(120, 60)
+		// 3. Break Time (Scaled by Circadian Rhythm)
+		// Night time = Longer breaks between bursts
+		meanBreak := 120.0 * (1.0 + sleepFactor*2.0) 
+		breakDur := randomGaussianDuration(meanBreak, 60)
+		
 		if breakDur < 15*time.Second {
 			breakDur = 15 * time.Second
 		}
@@ -112,17 +128,27 @@ func surferLoop(ctx context.Context, socksPort string) {
 		case <-ctx.Done():
 			return
 		case <-time.After(breakDur):
-			// Continue loop
 		}
+	}
+}
+
+func getCircadianFactor() float64 {
+	h := time.Now().UTC().Hour()
+	// UTC 00-06 (Deep Sleep), 06-08 (Wake), 23 (Wind down)
+	switch {
+	case h >= 0 && h < 6:
+		return 0.9 
+	case h >= 6 && h < 8:
+		return 0.5 
+	case h >= 23:
+		return 0.5 
+	default:
+		return 0.1 
 	}
 }
 
 func performSession(ctx context.Context, socksPort string) {
 	persona := pickPersona()
-	
-	// Use an ephemeral CookieJar.
-	// This makes us look like a real browser accepting cookies during the session,
-	// but because we recreate it every session, we are never tracked long-term.
 	jar, _ := cookiejar.New(nil)
 
 	client, err := createBrowserClient(socksPort, persona, jar)
@@ -133,21 +159,28 @@ func performSession(ctx context.Context, socksPort string) {
 
 	currentURL := seedSites[randomInt(len(seedSites))]
 	chainDepth := randomIntRange(minChainDepth, maxChainDepth)
+	
+	// Spoof Search Engine Referer for the FIRST hit (50% chance)
+	// This makes it look like we found the site via Google/Bing
 	var referer string
+	if randomInt(100) < 50 {
+		referer = searchReferers[randomInt(len(searchReferers))]
+		slog.Debug("chaff entry via search", "engine", referer)
+	}
 
 	slog.Debug("chaff session start", "seed", currentURL, "depth", chainDepth, "persona", persona.Browser)
 
 	for i := 0; i < chainDepth; i++ {
 		if ctx.Err() != nil { return }
 
-		// 1. Visit Page (Fetch HTML)
+		// 1. Visit Page
 		body, nextLinks, assets, err := visitPage(client, currentURL, referer, persona)
 		if err != nil {
 			slog.Debug("chaff visit failed", "url", currentURL, "err", err)
-			break // If page fails, end session naturally
+			break 
 		}
 
-		// 2. Determine Mode (Video vs Text)
+		// 2. Determine Mode
 		u, _ := url.Parse(currentURL)
 		isVideo := false
 		if u != nil {
@@ -157,37 +190,29 @@ func performSession(ctx context.Context, socksPort string) {
 			}
 		}
 
-		// 3. Emulate Consumption
+		// 3. Emulate Consumption (Active)
 		if isVideo {
 			// --- CINEMA MODE ---
-			// We DO NOT download the full video (saves bandwidth).
-			// We simulate "watching" by keeping the connection alive and 
-			// periodically fetching tiny assets (heartbeats).
+			if getCircadianFactor() > 0.8 { break } // Don't watch videos while sleeping
+
 			watchDuration := calculateWatchTime()
-			slog.Info("chaff watching video (simulated)", "url", currentURL, "duration", watchDuration)
+			slog.Info("chaff watching video", "url", currentURL, "duration", watchDuration)
 			
-			simulateStreaming(ctx, client, assets, watchDuration, currentURL, persona)
+			// Video "Heartbeat" (Frequent pings)
+			simulateActivity(ctx, client, assets, watchDuration, currentURL, persona, true)
 		} else {
-			// --- READING MODE ---
+			// --- READING MODE (Active Scrolling) ---
 			readDuration := calculateReadTime(len(body))
 			slog.Debug("chaff reading text", "url", currentURL, "duration", readDuration)
 			
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(readDuration):
-			}
+			// Text "Scrolling" (Sparse pings: 1-3 lazy loads)
+			simulateActivity(ctx, client, assets, readDuration, currentURL, persona, false)
 		}
 
-		// 4. Pick Next Link
-		if len(nextLinks) == 0 {
-			break
-		}
+		// 4. Next Link
+		if len(nextLinks) == 0 { break }
 
 		referer = currentURL 
-		
-		// If on a video site, we are highly likely (95%) to click another video on the same site.
-		// If reading news, we are likely (80%) to click internal, but sometimes external.
 		internalBias := 80
 		if isVideo { internalBias = 95 }
 
@@ -195,49 +220,85 @@ func performSession(ctx context.Context, socksPort string) {
 	}
 }
 
-// simulateStreaming mimics a user watching a video without downloading it.
-// It sends small "Heartbeat" requests (fetching icons/thumbnails) every 20-40 seconds.
-// This prevents the connection from looking "dead" and creates a traffic pattern
-// that looks like a slow stream or buffering to a metadata observer.
-func simulateStreaming(ctx context.Context, client *http.Client, assets []string, duration time.Duration, referer string, p persona) {
+// simulateActivity handles both Video Heartbeats and Text Scrolling (Lazy Loading).
+// isVideo=true: Frequent pings (20-40s) to mimic buffering.
+// isVideo=false: Sparse pings (1-3 total) to mimic scrolling down a page.
+func simulateActivity(ctx context.Context, client *http.Client, assets []string, duration time.Duration, referer string, p persona, isVideo bool) {
 	deadline := time.Now().Add(duration)
 	
-	// If no assets found to ping, just fetch the page URL again with a HEAD request
+	// If no assets, we just sleep
 	if len(assets) == 0 {
-		assets = []string{referer}
+		select {
+		case <-ctx.Done():
+		case <-time.After(duration):
+		}
+		return
 	}
 
 	for time.Now().Before(deadline) {
-		// Interval between "chunks" (Heartbeats)
-		// Random 20s - 40s.
-		sleepTime := randomDuration(20, 40)
+		var sleepTime time.Duration
 		
+		if isVideo {
+			// Video: Regular heartbeats (20s - 40s)
+			sleepTime = randomDuration(20, 40)
+		} else {
+			// Text: Random "scroll" events. 
+			// We split the remaining read time into chunks to decide if we scroll.
+			remaining := time.Until(deadline)
+			if remaining < 5*time.Second {
+				// Just finish reading
+				time.Sleep(remaining)
+				return
+			}
+			// Scroll 10s - 25s later
+			sleepTime = randomDuration(10, 25)
+		}
+		
+		// Wait
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(sleepTime):
 		}
+		
+		// If we overshot the deadline during sleep, exit
+		if time.Now().After(deadline) {
+			return
+		}
 
-		// Perform Heartbeat (Tiny bandwidth usage)
+		// Trigger Lazy Load (Tiny background request)
+		// We use a random asset from the page (image/script)
 		target := assets[randomInt(len(assets))]
 		
-		// Run in background so we don't block the sleep timer
 		go func(url string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			
-			req, _ := http.NewRequestWithContext(ctx, "HEAD", url, nil) // HEAD = Headers only!
+			// HEAD request is safer/faster, usually enough to trigger DNS/TCP activity
+			req, _ := http.NewRequestWithContext(ctx, "HEAD", url, nil)
 			req.Header.Set("User-Agent", p.UA)
 			req.Header.Set("Referer", referer)
+			req.Header.Set("Accept", "*/*")
 			resp, err := client.Do(req)
 			if err == nil {
 				resp.Body.Close()
 			}
 		}(target)
+
+		// For text reading, we don't want to ping forever. 
+		// Real users might trigger 2-3 lazy loads then stop.
+		// We add a 30% chance to stop "scrolling" early (and just read the rest).
+		if !isVideo && randomInt(100) < 30 {
+			remaining := time.Until(deadline)
+			if remaining > 0 {
+				time.Sleep(remaining)
+			}
+			return
+		}
 	}
 }
 
-// visitPage fetches content and extracts both Links (for navigation) and Assets (for heartbeats).
+// visitPage fetches content + extracts assets
 func visitPage(client *http.Client, target, referer string, p persona) ([]byte, []string, []string, error) {
 	req, err := http.NewRequest("GET", target, nil)
 	if err != nil {
@@ -255,7 +316,7 @@ func visitPage(client *http.Client, target, referer string, p persona) ([]byte, 
 	if referer == "" {
 		req.Header.Set("Sec-Fetch-Site", "none")
 	} else {
-		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Sec-Fetch-Site", "same-origin") // Simplified
 		req.Header.Set("Referer", referer)
 	}
 
@@ -269,7 +330,7 @@ func visitPage(client *http.Client, target, referer string, p persona) ([]byte, 
 		return nil, nil, nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
 
-	// 5MB Limit per page to prevent memory DoS or accidental huge downloads
+	// 5MB Limit
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
 	if err != nil {
 		return nil, nil, nil, err
@@ -281,7 +342,7 @@ func visitPage(client *http.Client, target, referer string, p persona) ([]byte, 
 	return body, links, assets, nil
 }
 
-// extractContent finds navigational Links AND static Assets (images, scripts)
+// extractContent scans for <a href> and <img src>
 func extractContent(body []byte, baseURL *url.URL) ([]string, []string) {
 	var links []string
 	var assets []string
@@ -297,7 +358,6 @@ func extractContent(body []byte, baseURL *url.URL) ([]string, []string) {
 		if tokenType == html.StartTagToken || tokenType == html.SelfClosingTagToken {
 			token := tokenizer.Token()
 			
-			// 1. Navigation Links (<a href>)
 			if token.Data == "a" {
 				for _, attr := range token.Attr {
 					if attr.Key == "href" {
@@ -308,7 +368,7 @@ func extractContent(body []byte, baseURL *url.URL) ([]string, []string) {
 				}
 			}
 			
-			// 2. Assets (<img src>, <script src>) for Heartbeats
+			// Lazy load candidates: img, script, link(css)
 			if token.Data == "img" || token.Data == "script" {
 				for _, attr := range token.Attr {
 					if attr.Key == "src" {
@@ -326,12 +386,9 @@ func extractContent(body []byte, baseURL *url.URL) ([]string, []string) {
 func resolveURL(val string, baseURL *url.URL) string {
 	val = strings.TrimSpace(val)
 	if val == "" || strings.HasPrefix(val, "data:") { return "" }
-	
 	u, err := url.Parse(val)
 	if err != nil { return "" }
-	
 	abs := baseURL.ResolveReference(u)
-	// Only http/s
 	if abs.Scheme != "http" && abs.Scheme != "https" { return "" }
 	return abs.String()
 }
@@ -350,14 +407,12 @@ func isInvalidLink(val string) bool {
 
 func pickWeightedLink(links []string, currentURL string, internalBiasPercent int) string {
 	if len(links) == 0 { return "" }
-	
 	current, _ := url.Parse(currentURL)
 	var internalLinks []string
 	var externalLinks []string
 	
 	for _, l := range links {
 		u, _ := url.Parse(l)
-		// Check host match (simple version)
 		if u != nil && current != nil && (u.Host == current.Host || strings.HasSuffix(u.Host, "."+current.Host)) {
 			internalLinks = append(internalLinks, l)
 		} else {
@@ -365,19 +420,16 @@ func pickWeightedLink(links []string, currentURL string, internalBiasPercent int
 		}
 	}
 
-	// Prefer internal links based on bias
 	if len(internalLinks) > 0 && randomInt(100) < internalBiasPercent {
 		return internalLinks[randomInt(len(internalLinks))]
 	}
-	
-	// Fallback
 	if len(externalLinks) > 0 {
 		return externalLinks[randomInt(len(externalLinks))]
 	}
 	return links[randomInt(len(links))]
 }
 
-// --- Browser Emulation (TLS + Persona) ---
+// --- Browser Emulation ---
 
 type persona struct {
 	Browser    string
@@ -390,7 +442,6 @@ type persona struct {
 func pickPersona() persona {
 	r := randomInt(100)
 	if r < 60 {
-		// Chrome (60% share)
 		return persona{
 			Browser:    "chrome",
 			UA:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -399,7 +450,6 @@ func pickPersona() persona {
 			ID:         &utls.HelloChrome_120,
 		}
 	} else if r < 85 {
-		// Firefox (25% share)
 		return persona{
 			Browser:    "firefox",
 			UA:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
@@ -408,7 +458,6 @@ func pickPersona() persona {
 			ID:         &utls.HelloFirefox_120,
 		}
 	} else {
-		// Edge (15% share)
 		return persona{
 			Browser:    "edge",
 			UA:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
@@ -422,22 +471,14 @@ func pickPersona() persona {
 func createBrowserClient(socksPort string, p persona, jar *cookiejar.Jar) (*http.Client, error) {
 	proxyAddr := "127.0.0.1:" + socksPort
 	dialer, err := proxy.SOCKS5("tcp", proxyAddr, nil, proxy.Direct)
-	if err != nil {
-		return nil, err
-	}
+	if err != nil { return nil, err }
 
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			tcpConn, err := dialer.Dial(network, addr)
 			if err != nil { return nil, err }
-
 			host, _, _ := net.SplitHostPort(addr)
-			// Mimic real browser SNI
-			tlsConfig := &utls.Config{
-				ServerName: host, 
-				InsecureSkipVerify: true, // Needed for proxy chains often, but be careful in production
-			}
-			
+			tlsConfig := &utls.Config{ServerName: host, InsecureSkipVerify: true}
 			uConn := utls.UClient(tcpConn, tlsConfig, *p.ID)
 			if err := uConn.Handshake(); err != nil {
 				_ = tcpConn.Close()
@@ -450,23 +491,17 @@ func createBrowserClient(socksPort string, p persona, jar *cookiejar.Jar) (*http
 		IdleConnTimeout:   30 * time.Second,
 	}
 
-	return &http.Client{
-		Transport: tr,
-		Jar:       jar,
-		Timeout:   120 * time.Second,
-	}, nil
+	return &http.Client{Transport: tr, Jar: jar, Timeout: 120 * time.Second}, nil
 }
 
-// --- Natural Mathematics Helpers ---
+// --- Math Helpers ---
 
 func calculateReadTime(contentLength int) time.Duration {
 	if contentLength < 1000 { contentLength = 1000 }
 	if contentLength > 100000 { contentLength = 100000 }
-	
-	baseSeconds := float64(contentLength) / 2500.0 // faster reader
+	baseSeconds := float64(contentLength) / 2500.0
 	noise := randomGaussian(0, 10) 
 	finalSeconds := baseSeconds + readTimeMean + noise
-	
 	if finalSeconds < 5 { finalSeconds = 5 }
 	return time.Duration(finalSeconds) * time.Second
 }
@@ -474,7 +509,7 @@ func calculateReadTime(contentLength int) time.Duration {
 func calculateWatchTime() time.Duration {
 	secs := randomGaussian(watchTimeMean, watchTimeStdDev)
 	if secs < 30 { secs = 30 } 
-	if secs > 900 { secs = 900 } // Cap at 15 mins
+	if secs > 900 { secs = 900 }
 	return time.Duration(secs) * time.Second
 }
 
