@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+// Config holds the global configuration for the TorGo proxy.
 type Config struct {
 	Instances     int
 	SocksBindAddr string
@@ -43,6 +44,10 @@ type Config struct {
 
 	// Traffic padding
 	ChaffEnabled bool
+
+	// Bridges (Obfuscation) - Zero Trust Support
+	UseBridges bool
+	Bridges    []string
 }
 
 type Instance struct {
@@ -53,6 +58,15 @@ type Instance struct {
 	cmd       *exec.Cmd
 }
 
+// TemplateData is used to inject variables into torrc.template
+type TemplateData struct {
+	SOCKSPORT   string
+	DNSPORT     string
+	DATADIR     string
+	USE_BRIDGES bool
+	BRIDGES     []string
+}
+
 var (
 	globalTmpl *template.Template
 	once       sync.Once
@@ -61,6 +75,42 @@ var (
 
 func Load() *Config {
 	n := getInt("TOR_INSTANCES", 8, 32)
+
+	// --- BRIDGE LOADING STRATEGY (Secrets First) ---
+	var rawBridges string
+
+	// 1. Try Docker Secret File first (More Secure)
+	// Default Docker Secret path or custom path from env
+	secretPath := os.Getenv("TORGO_BRIDGES_FILE")
+	if secretPath == "" {
+		secretPath = "/run/secrets/torgo_bridges"
+	}
+
+	if content, err := os.ReadFile(secretPath); err == nil {
+		rawBridges = string(content)
+		slog.Info("loaded bridges from docker secret", "path", secretPath)
+	} else {
+		// 2. Fallback to Env Var (Less Secure)
+		// Only use this if the secret file is missing
+		rawBridges = os.Getenv("TORGO_BRIDGES")
+		if rawBridges != "" {
+			slog.Warn("loading bridges from ENV (less secure) - consider using Docker Secrets")
+		}
+	}
+
+	var bridges []string
+	if rawBridges != "" {
+		// Normalize: Convert newlines and semicolons to commas for splitting
+		rawBridges = strings.ReplaceAll(rawBridges, "\n", ",")
+		rawBridges = strings.ReplaceAll(rawBridges, ";", ",")
+		
+		parts := strings.Split(rawBridges, ",")
+		for _, b := range parts {
+			if trimmed := strings.TrimSpace(b); trimmed != "" {
+				bridges = append(bridges, trimmed)
+			}
+		}
+	}
 
 	c := &Config{
 		Instances:     n,
@@ -77,11 +127,13 @@ func Load() *Config {
 
 		SocksJitterMaxMs: getInt("TORGO_SOCKS_JITTER_MS_MAX", 0, 5000),
 		ChaffEnabled:     os.Getenv("TORGO_ENABLE_CHAFF") == "1",
+
+		UseBridges: len(bridges) > 0,
+		Bridges:    bridges,
 	}
 
 	// 1. GLOBAL ROTATION SETTINGS
 	// We allow 0 to mean "Disabled".
-	// The max value is set very high (10 years) to allow long-running setups.
 	c.RotateAfterConns = getInt("TORGO_ROTATE_CONNS", 64, 1_000_000_000)
 	c.RotateAfterSeconds = getInt("TORGO_ROTATE_SECS", 900, 315_360_000)
 
@@ -94,16 +146,12 @@ func Load() *Config {
 	c.StableMaxConnsPerInstance = getInt("TORGO_STABLE_MAX_CONNS", max(c.MaxConnsPerInstance*2, 64), 8192)
 
 	// --- STABLE ROTATION ---
-	// Default: If global is 0 (disabled), stable is 0. Else 4x global.
 	var defStableSecs int
 	if c.RotateAfterSeconds == 0 {
 		defStableSecs = 0
 	} else {
 		defStableSecs = max(c.RotateAfterSeconds*4, 3600)
 	}
-	
-	// FIX: Removed the logic that forced this to be > 3600. 
-	// Now accepts 0 from env var or derived default.
 	c.StableRotateSeconds = getInt("TORGO_STABLE_ROTATE_SECS", defStableSecs, 315_360_000)
 
 	var defStableConns int
@@ -118,7 +166,6 @@ func Load() *Config {
 	// --- PARANOID ROTATION ---
 	c.ParanoidMaxConnsPerInstance = getInt("TORGO_PARANOID_MAX_CONNS", max(16, c.MaxConnsPerInstance/2), 2048)
 	
-	// Default: If global is 0, paranoid is 0. Else global/2 or global/3.
 	var defParanoidConns int
 	if c.RotateAfterConns == 0 {
 		defParanoidConns = 0
@@ -144,9 +191,8 @@ func Load() *Config {
 		"blind", c.BlindControl,
 		"maxTotalConns", c.MaxTotalConns,
 		"rotateAfterSeconds", c.RotateAfterSeconds,
-		"stableRotateSeconds", c.StableRotateSeconds,     // Check this in logs!
-		"paranoidRotateSeconds", c.ParanoidRotateSeconds, // Check this in logs!
 		"chaffEnabled", c.ChaffEnabled,
+		"bridges_configured", len(c.Bridges),
 	)
 
 	return c
@@ -169,13 +215,17 @@ func (i *Instance) Start() error {
 	})
 
 	var b strings.Builder
-	b.Grow(2048)
+	b.Grow(4096)
 
-	data := map[string]string{
-		"SOCKSPORT": "127.0.0.1:" + strconv.Itoa(i.SocksPort),
-		"DNSPORT":   "127.0.0.1:" + strconv.Itoa(i.DNSPort),
-		"DATADIR":   i.DataDir,
+	// Populate template data with Bridge configuration
+	data := TemplateData{
+		SOCKSPORT:   "127.0.0.1:" + strconv.Itoa(i.SocksPort),
+		DNSPORT:     "127.0.0.1:" + strconv.Itoa(i.DNSPort),
+		DATADIR:     i.DataDir,
+		USE_BRIDGES: cfg.UseBridges,
+		BRIDGES:     cfg.Bridges,
 	}
+
 	if err := globalTmpl.Execute(&b, data); err != nil {
 		return fmt.Errorf("template exec failed: %w", err)
 	}
@@ -185,9 +235,11 @@ func (i *Instance) Start() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = i.DataDir
+	
+	// Ensure obfs4proxy is found in path
 	cmd.Env = []string{
 		"HOME=" + i.DataDir,
-		"PATH=/usr/bin:/bin",
+		"PATH=/usr/bin:/bin:/usr/local/bin", 
 	}
 
 	i.cmd = cmd
@@ -234,7 +286,7 @@ func getEnv(key, def string) string {
 
 func getInt(env string, def, maxVal int) int {
 	if s := os.Getenv(env); s != "" {
-		// FIX: Allow 0 to be returned (v >= 0)
+		// Allow 0 to be returned (v >= 0)
 		if v, err := strconv.Atoi(s); err == nil && v >= 0 && v <= maxVal {
 			return v
 		}
